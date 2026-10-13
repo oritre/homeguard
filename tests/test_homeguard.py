@@ -22,6 +22,9 @@ import dnsfilter  # noqa: E402
 import homeguard_agent  # noqa: E402
 import homeguard_server as hs  # noqa: E402
 
+# Never touch the real firewall/DNS/registry while testing, even on Windows.
+homeguard_agent.winctl.IS_WIN = False
+
 
 def free_port():
     with socket.socket() as s:
