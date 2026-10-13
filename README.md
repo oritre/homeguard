@@ -57,7 +57,7 @@
 **על כל מחשב של הילדים (כמנהל):**
 ```powershell
 powershell -ExecutionPolicy Bypass -File install\install-agent.ps1 `
-    -ServerUrl http://192.168.1.10:8800 -AgentToken <token> -PcName "סלון" -ExemptUsers "ori","wife"
+    -ServerUrl http://192.168.33.53:8800 -AgentToken <token> -PcName "סלון" -ExemptUsers "ori","wife"
 ```
 הסקריפט מתקין Python 3.12 לכל המשתמשים (winget), מעתיק ל-`C:\Program Files\HomeGuard`, שומר הגדרות שרק מנהל יכול לקרוא,
 מכבה DNS-over-HTTPS בכרום/אדג'/פיירפוקס/בריב, ורושם שתי משימות: הסוכן (SYSTEM, עם עליית המחשב) ומסך הנעילה (בכל כניסה, ונפתח מחדש כל דקה אם נסגר).

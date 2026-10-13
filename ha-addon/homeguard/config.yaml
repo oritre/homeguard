@@ -1,0 +1,14 @@
+name: "HomeGuard"
+version: "1.0.0"
+slug: homeguard
+description: "HomeGuard server - Telegram parent bot + API for the kids' PC agents (port 8800)"
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+host_network: true
+map:
+  - type: share
+    read_only: false

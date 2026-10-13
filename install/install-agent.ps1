@@ -3,11 +3,11 @@
   להריץ ב-PowerShell כמנהל (Run as Administrator):
 
     powershell -ExecutionPolicy Bypass -File install-agent.ps1 `
-        -ServerUrl http://192.168.1.10:8800 -AgentToken <token> `
+        -ServerUrl http://192.168.33.53:8800 -AgentToken <token> `
         -PcName "סלון" -ExemptUsers "ori","wife"
 #>
 param(
-    [Parameter(Mandatory = $true)] [string]$ServerUrl,
+    [string]$ServerUrl = "http://192.168.33.53:8800",  # HomeGuard add-on on the Home Assistant Pi
     [Parameter(Mandatory = $true)] [string]$AgentToken,
     [string]$PcName = $env:COMPUTERNAME,
     [string[]]$ExemptUsers = @(),

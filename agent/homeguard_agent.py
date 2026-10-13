@@ -29,7 +29,7 @@ import winctl  # noqa: E402
 log = logging.getLogger("homeguard")
 
 DEFAULT_CONFIG = {
-    "server_url": "http://192.168.1.10:8800",
+    "server_url": "http://192.168.33.53:8800",
     "agent_token": "",
     "pc_name": os.environ.get("COMPUTERNAME", "pc"),
     "exempt_users": [],               # parents' Windows accounts: never locked or filtered
