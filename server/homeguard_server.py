@@ -5,10 +5,12 @@ Pure standard library (Python 3.10+). Runs on any always-on machine in the house
 
     python homeguard_server.py run                      # start bot + API
     python homeguard_server.py kid add noam 1234 "נועם"   # add a kid
+    python homeguard_server.py kid new noam "נועם"        # temporary password, kid picks their own
+    python homeguard_server.py kid new mom "אמא" --master # master: no approval, no filtering, no time limit
     python homeguard_server.py kid list
     python homeguard_server.py kid passwd noam 5678
     python homeguard_server.py kid remove noam
-    python homeguard_server.py site allow wikipedia.org
+    python homeguard_server.py site allow wikipedia.org [minutes]
     python homeguard_server.py site block tiktok.com
     python homeguard_server.py gen-token
 
@@ -38,8 +40,10 @@ MODES = {
     "full": "🌐 אינטרנט מלא",
     "allowlist": "✅ רק אתרים מאושרים",
     "offline": "🚫 בלי אינטרנט",
+    "open": "🔓 פתוח לגמרי (מאסטר)",
 }
-MODE_SHORT = {"full": "🌐", "allowlist": "✅", "offline": "🚫"}
+MODE_SHORT = {"full": "🌐", "allowlist": "✅", "offline": "🚫", "open": "🔓"}
+FOREVER = 4102444800.0  # 2100-01-01: sessions that end only when someone locks them
 
 DEFAULT_CONFIG = {
     "telegram_token": "",
@@ -63,6 +67,8 @@ def load_config(path: str) -> dict:
 
 
 def fmt_min(minutes: int) -> str:
+    if minutes <= 0:
+        return "ללא הגבלה"
     if minutes % 60 == 0:
         h = minutes // 60
         return "שעה" if h == 1 else ("שעתיים" if h == 2 else f"{h} שעות")
@@ -82,6 +88,18 @@ def normalize_domain(d: str) -> str:
     if d.startswith("www."):
         d = d[4:]
     return d.strip(".")
+
+
+def valid_domain(d: str) -> bool:
+    return "." in d and len(d) <= 253 and all(c.isalnum() or c in "-." for c in d)
+
+
+def until(ends: float) -> str:
+    return "ללא הגבלת זמן" if ends >= FOREVER else f"עד {hhmm(ends)}"
+
+
+def temp_password() -> str:
+    return f"{secrets.randbelow(10000):04d}"
 
 
 # --------------------------------------------------------------------------- DB
@@ -117,6 +135,14 @@ class DB:
                     pc TEXT NOT NULL, ts REAL NOT NULL);
                 """
             )
+            for table, col, decl in (("kids", "pw_plain", "TEXT"),
+                                     ("kids", "role", "TEXT NOT NULL DEFAULT 'kid'"),
+                                     ("kids", "must_set", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("kids", "disabled", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("sites", "expires", "REAL"),
+                                     ("requests", "detail", "TEXT")):
+                if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             self.conn.commit()
 
     def q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
@@ -134,17 +160,28 @@ class DB:
     def _hash(password: str, salt: str) -> str:
         return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000).hex()
 
-    def add_kid(self, username: str, password: str, display: str) -> None:
+    def add_kid(self, username: str, password: str, display: str, role: str = "kid",
+                must_set: bool = False) -> None:
         salt = secrets.token_hex(16)
-        self.x("INSERT OR REPLACE INTO kids VALUES (?,?,?,?)",
-               (username.lower(), display, salt, self._hash(password, salt)))
+        self.x("INSERT INTO kids (username, display, salt, pw_hash, pw_plain, role, must_set) "
+               "VALUES (?,?,?,?,?,?,?) ON CONFLICT(username) DO UPDATE SET display=excluded.display, "
+               "salt=excluded.salt, pw_hash=excluded.pw_hash, pw_plain=excluded.pw_plain, "
+               "role=excluded.role, must_set=excluded.must_set",
+               (username.lower(), display, salt, self._hash(password, salt), password, role, int(must_set)))
+
+    def set_password(self, username: str, password: str, must_set: bool = False) -> bool:
+        salt = secrets.token_hex(16)
+        self.x("UPDATE kids SET salt=?, pw_hash=?, pw_plain=?, must_set=? WHERE username=?",
+               (salt, self._hash(password, salt), password, int(must_set), username.lower()))
+        return bool(self.kid(username))
+
+    def kid(self, username: str):
+        rows = self.q("SELECT * FROM kids WHERE username=?", (username.strip().lower(),))
+        return rows[0] if rows else None
 
     def check_kid(self, username: str, password: str):
-        rows = self.q("SELECT * FROM kids WHERE username=?", (username.strip().lower(),))
-        if not rows:
-            return None
-        row = rows[0]
-        if hmac.compare_digest(row["pw_hash"], self._hash(password, row["salt"])):
+        row = self.kid(username)
+        if row and hmac.compare_digest(row["pw_hash"], self._hash(password, row["salt"])):
             return row
         return None
 
@@ -153,11 +190,25 @@ class DB:
         return rows[0]["display"] if rows else username
 
     # sites
-    def sites(self, lst: str) -> list[str]:
-        return [r["domain"] for r in self.q("SELECT domain FROM sites WHERE list=? ORDER BY domain", (lst,))]
+    def site_rows(self, lst: str) -> list[sqlite3.Row]:
+        return self.q("SELECT domain, expires FROM sites WHERE list=? AND (expires IS NULL OR expires>?) "
+                      "ORDER BY domain", (lst, time.time()))
 
-    def add_site(self, domain: str, lst: str) -> None:
-        self.x("INSERT OR IGNORE INTO sites VALUES (?,?)", (normalize_domain(domain), lst))
+    def sites(self, lst: str) -> list[str]:
+        return [r["domain"] for r in self.site_rows(lst)]
+
+    def add_site(self, domain: str, lst: str, minutes: int | None = None) -> None:
+        """minutes=None: permanent, and replaces the opposite list's entry.
+        A temporary allow keeps any block and overrides it until it expires."""
+        d = normalize_domain(domain)
+        if minutes:
+            self.x("INSERT INTO sites (domain, list, expires) VALUES (?,?,?) ON CONFLICT(domain, list) DO UPDATE "
+                   "SET expires=CASE WHEN expires IS NULL THEN NULL ELSE MAX(expires, excluded.expires) END",
+                   (d, lst, time.time() + minutes * 60))
+            return
+        self.x("INSERT INTO sites (domain, list, expires) VALUES (?,?,NULL) "
+               "ON CONFLICT(domain, list) DO UPDATE SET expires=NULL", (d, lst))
+        self.x("DELETE FROM sites WHERE domain=? AND list=?", (d, "block" if lst == "allow" else "allow"))
 
     def remove_site(self, domain: str, lst: str) -> None:
         self.x("DELETE FROM sites WHERE domain=? AND list=?", (normalize_domain(domain), lst))
@@ -169,6 +220,15 @@ class DB:
 
     def end_sessions(self, pc: str) -> None:
         self.x("UPDATE sessions SET active=0, ends=MIN(ends, ?) WHERE pc=? AND active=1", (time.time(), pc))
+
+    def start_session(self, pc: str, kid: str, mode: str, minutes: int) -> tuple[int, float]:
+        """minutes <= 0: no time limit, until someone locks it."""
+        now = time.time()
+        ends = FOREVER if minutes <= 0 else now + minutes * 60
+        self.end_sessions(pc)
+        sid = self.x("INSERT INTO sessions (pc, kid, mode, started, ends) VALUES (?,?,?,?,?)",
+                     (pc, kid, mode, now, ends))
+        return sid, ends
 
 
 # --------------------------------------------------------------------- Telegram
@@ -245,6 +305,16 @@ class HomeGuard:
                             f"(שם משתמש אחרון: {username})")
             return {"ok": False, "error": "שם משתמש או סיסמה שגויים"}
         name = kid["username"]
+        if kid["disabled"]:
+            return {"ok": False, "error": "החשבון מושבת. דברו עם אבא/אמא."}
+        if kid["must_set"]:
+            return {"ok": False, "need_new_password": True, "display": kid["display"]}
+        if kid["role"] == "master":
+            self.db.start_session(pc, name, "open", 0)
+            rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, status, decided_by) "
+                            "VALUES ('login',?,?,?,'approved','master')", (pc, name, now))
+            self.notify(f"🔓 {kid['display']} נכנס/ה למחשב '{pc}' עם חשבון מאסטר ({hhmm(now)})")
+            return {"ok": True, "request_id": rid, "display": kid["display"], "approved": True}
         # One pending login request per pc: cancel older ones.
         for old in self.db.q("SELECT * FROM requests WHERE pc=? AND kind='login' AND status='pending'", (pc,)):
             self.db.x("UPDATE requests SET status='cancelled' WHERE id=?", (old["id"],))
@@ -252,12 +322,13 @@ class HomeGuard:
         rid = self.db.x("INSERT INTO requests (kind, pc, kid, created) VALUES ('login',?,?,?)", (pc, name, now))
         kb = []
         for mode in ("full", "allowlist", "offline"):
-            kb.append([{"text": f"{MODE_SHORT[mode]} {fmt_min(m)}", "callback_data": f"ap:{rid}:{mode}:{m}"}
-                       for m in self.cfg["durations"]])
+            options = list(self.cfg["durations"]) + ([0] if mode != "offline" else [])
+            kb.append([{"text": f"{MODE_SHORT[mode]} {fmt_min(m) if m else '♾️'}",
+                        "callback_data": f"ap:{rid}:{mode}:{m}"} for m in options])
         kb.append([{"text": "❌ לא עכשיו", "callback_data": f"dn:{rid}"}])
         text = (f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})\n"
                 f"{MODE_SHORT['full']} אינטרנט מלא · {MODE_SHORT['allowlist']} אתרים מאושרים · "
-                f"{MODE_SHORT['offline']} בלי אינטרנט")
+                f"{MODE_SHORT['offline']} בלי אינטרנט · ♾️ ללא הגבלת זמן")
         msgs = self.notify(text, kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True, "request_id": rid, "display": kid["display"]}
@@ -267,6 +338,40 @@ class HomeGuard:
         if not rows:
             return {"status": "unknown"}
         return {"status": rows[0]["status"]}
+
+    def change_password(self, pc: str, username: str, old: str, new: str) -> dict:
+        now = time.time()
+        recent = self.db.q("SELECT COUNT(*) c FROM failed_logins WHERE pc=? AND ts>?", (pc, now - 600))[0]["c"]
+        if recent >= self.cfg["max_failed_logins"]:
+            return {"ok": False, "error": "יותר מדי ניסיונות. נסו שוב בעוד כמה דקות."}
+        kid = self.db.check_kid(username, old)
+        if not kid:
+            self.db.x("INSERT INTO failed_logins VALUES (?,?)", (pc, now))
+            return {"ok": False, "error": "שם משתמש או סיסמה נוכחית שגויים"}
+        if not 4 <= len(new) <= 32:
+            return {"ok": False, "error": "הסיסמה החדשה צריכה להיות באורך 4 עד 32 תווים"}
+        if new == old:
+            return {"ok": False, "error": "הסיסמה החדשה צריכה להיות שונה מהקודמת"}
+        self.db.set_password(kid["username"], new)
+        self.notify(f"🔑 {kid['display']} ({kid['username']}) קבע/ה סיסמה חדשה: {new}")
+        return {"ok": True}
+
+    def request_site(self, pc: str, domain: str) -> dict:
+        s = self.db.active_session(pc)
+        if not s or s["ends"] <= time.time():
+            return {"ok": False, "error": "אין זמן פעיל"}
+        d = normalize_domain(domain)
+        if not valid_domain(d):
+            return {"ok": False, "error": "כתובת אתר לא תקינה"}
+        if self.db.q("SELECT 1 FROM requests WHERE kind='site' AND pc=? AND detail=? AND status='pending'", (pc, d)):
+            return {"ok": True}
+        rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, session_id, detail) VALUES ('site',?,?,?,?,?)",
+                        (pc, s["kid"], time.time(), s["id"], d))
+        kb = [[{"text": fmt_min(m), "callback_data": f"st:{rid}:{m}"} for m in self.cfg["durations"]],
+              [{"text": "♾️ תמיד", "callback_data": f"st:{rid}:0"}, {"text": "❌ לא", "callback_data": f"dn:{rid}"}]]
+        msgs = self.notify(f"🌐 {self.db.kid_display(s['kid'])} מבקש/ת גישה לאתר {d} (מחשב '{pc}')", kb)
+        self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
+        return {"ok": True}
 
     def cancel_request(self, rid: int) -> None:
         rows = self.db.q("SELECT * FROM requests WHERE id=? AND status='pending'", (rid,))
@@ -284,11 +389,14 @@ class HomeGuard:
         session = None
         if s and s["ends"] > now:
             session = {"id": s["id"], "kid": s["kid"], "display": self.db.kid_display(s["kid"]),
-                       "mode": s["mode"], "remaining": int(s["ends"] - now)}
+                       "mode": s["mode"], "remaining": int(s["ends"] - now), "unlimited": s["ends"] >= FOREVER}
         pending_ext = bool(s and self.db.q(
             "SELECT 1 FROM requests WHERE kind='extend' AND session_id=? AND status='pending'", (s["id"],)))
+        allow = self.db.site_rows("allow")
+        temp_allowed = {r["domain"] for r in allow if r["expires"] is not None}
         return {"session": session, "extend_pending": pending_ext,
-                "allowlist": self.db.sites("allow"), "blocklist": self.db.sites("block"),
+                "allowlist": [r["domain"] for r in allow],
+                "blocklist": [d for d in self.db.sites("block") if d not in temp_allowed],
                 "server_time": now}
 
     def request_extension(self, pc: str) -> dict:
@@ -331,13 +439,17 @@ class HomeGuard:
             return "נדחה"
         if kind == "ap":
             mode, minutes = parts[2], int(parts[3])
-            now = time.time()
-            self.db.end_sessions(r["pc"])
-            sid = self.db.x("INSERT INTO sessions (pc, kid, mode, started, ends) VALUES (?,?,?,?,?)",
-                            (r["pc"], r["kid"], mode, now, now + minutes * 60))
+            sid, ends = self.db.start_session(r["pc"], r["kid"], mode, minutes)
             self.db.x("UPDATE requests SET status='approved', decided_by=?, session_id=? WHERE id=?", (who, sid, rid))
-            self.edit_all(msgs, f"✅ {display} ({r['pc']}): {MODES[mode]} ל{fmt_min(minutes)}, "
-                                f"עד {hhmm(now + minutes * 60)} · אושר ע\"י {who}")
+            length = "ללא הגבלת זמן" if minutes <= 0 else f"ל{fmt_min(minutes)}, עד {hhmm(ends)}"
+            self.edit_all(msgs, f"✅ {display} ({r['pc']}): {MODES[mode]} {length} · אושר ע\"י {who}")
+            return "אושר"
+        if kind == "st":
+            minutes = int(parts[2])
+            self.db.add_site(r["detail"], "allow", minutes or None)
+            self.db.x("UPDATE requests SET status='approved', decided_by=? WHERE id=?", (who, rid))
+            length = "תמיד" if minutes <= 0 else f"ל{fmt_min(minutes)}"
+            self.edit_all(msgs, f"🌐 {r['detail']} אושר {length} ({display}, {r['pc']}) · {who}")
             return "אושר"
         if kind == "ex":
             minutes = int(parts[2])
@@ -349,7 +461,7 @@ class HomeGuard:
             new_end = max(s[0]["ends"], time.time()) + minutes * 60
             self.db.x("UPDATE sessions SET ends=?, warned=0 WHERE id=?", (new_end, s[0]["id"]))
             self.db.x("UPDATE requests SET status='approved', decided_by=? WHERE id=?", (who, rid))
-            self.edit_all(msgs, f"⏳ {display} ({r['pc']}): +{fmt_min(minutes)}, עד {hhmm(new_end)} · {who}")
+            self.edit_all(msgs, f"⏳ {display} ({r['pc']}): +{fmt_min(minutes)}, {until(new_end)} · {who}")
             return "הוארך"
         return "?"
 
@@ -357,6 +469,13 @@ class HomeGuard:
         s = self.db.active_session(pc)
         self.db.end_sessions(pc)
         return bool(s)
+
+    def lock_kid(self, username: str) -> list[str]:
+        pcs = [s["pc"] for s in self.db.q("SELECT DISTINCT pc FROM sessions WHERE kid=? AND active=1",
+                                          (username.lower(),))]
+        for pc in pcs:
+            self.db.end_sessions(pc)
+        return pcs
 
     def extend(self, pc: str, minutes: int) -> bool:
         s = self.db.active_session(pc)
@@ -376,9 +495,9 @@ class HomeGuard:
             dot = "🟢" if online else "⚫"
             s = self.db.active_session(p["name"])
             if s and s["ends"] > now:
-                left = int((s["ends"] - now) // 60)
-                lines.append(f"{dot} {p['name']}: {self.db.kid_display(s['kid'])} · {MODES[s['mode']]} · "
-                             f"נשארו {left} דק' (עד {hhmm(s['ends'])})")
+                left = ("ללא הגבלת זמן" if s["ends"] >= FOREVER
+                        else f"נשארו {int((s['ends'] - now) // 60)} דק' (עד {hhmm(s['ends'])})")
+                lines.append(f"{dot} {p['name']}: {self.db.kid_display(s['kid'])} · {MODES[s['mode']]} · {left}")
             else:
                 seen = "" if online else f" (נראה לאחרונה {hhmm(p['last_seen'])})" if p["last_seen"] else ""
                 lines.append(f"{dot} {p['name']}: נעול{seen}")
@@ -391,6 +510,9 @@ class HomeGuard:
             if s["ends"] <= now:
                 self.db.x("UPDATE sessions SET active=0 WHERE id=?", (s["id"],))
                 self.notify(f"⏰ הזמן של {self.db.kid_display(s['kid'])} במחשב '{s['pc']}' נגמר. המחשב ננעל.")
+        for site in self.db.q("SELECT domain FROM sites WHERE expires IS NOT NULL AND expires<=?", (now,)):
+            self.notify(f"⌛ הגישה הזמנית ל-{site['domain']} הסתיימה")
+        self.db.x("DELETE FROM sites WHERE expires IS NOT NULL AND expires<=?", (now,))
         self.db.x("DELETE FROM failed_logins WHERE ts<?", (now - 3600,))
 
     # ---- Telegram update handling
@@ -435,8 +557,11 @@ class HomeGuard:
                   if (s := self.db.active_session(p["name"])) and s["ends"] > now]
             self.reply(chat, self.status_text(), kb or None)
         elif cmd == "/lock":
-            pcs = [p["name"] for p in self.db.q("SELECT name FROM pcs")] if arg in ("", "all", "הכל") else [arg]
-            locked = [pc for pc in pcs if self.lock(pc)]
+            if arg and self.db.kid(arg):
+                locked = self.lock_kid(arg)
+            else:
+                pcs = [p["name"] for p in self.db.q("SELECT name FROM pcs")] if arg in ("", "all", "הכל") else [arg]
+                locked = [pc for pc in pcs if self.lock(pc)]
             self.reply(chat, "🔒 ננעל: " + ", ".join(locked) if locked else "לא היה מחשב פתוח.")
         elif cmd == "/extend":
             parts = arg.split()
@@ -448,25 +573,79 @@ class HomeGuard:
                 self.reply(chat, f"אין זמן פעיל במחשב {parts[0]}")
         elif cmd in ("/allow", "/block", "/unallow", "/unblock"):
             if not arg:
-                self.reply(chat, f"שימוש: {cmd} example.com")
+                self.reply(chat, f"שימוש: {cmd} example.com" + (" [דקות]" if cmd == "/allow" else ""))
                 return
             lst = "allow" if "allow" in cmd else "block"
-            for d in arg.replace(",", " ").split():
-                (self.db.remove_site if cmd.startswith("/un") else self.db.add_site)(d, lst)
+            words = arg.replace(",", " ").split()
+            minutes = int(words.pop()) if cmd == "/allow" and len(words) > 1 and words[-1].isdigit() else None
+            for d in words:
+                if cmd.startswith("/un"):
+                    self.db.remove_site(d, lst)
+                else:
+                    self.db.add_site(d, lst, minutes)
             self.reply(chat, self.sites_text())
         elif cmd == "/sites":
             self.reply(chat, self.sites_text())
         elif cmd == "/kids":
-            kids = self.db.q("SELECT username, display FROM kids ORDER BY username")
-            self.reply(chat, "\n".join(f"🧒 {k['display']} ({k['username']})" for k in kids) or "אין ילדים מוגדרים")
+            self.reply(chat, self.kids_text())
+        elif cmd in ("/addkid", "/addmaster"):
+            parts = arg.split(maxsplit=1)
+            if not parts:
+                self.reply(chat, f"שימוש: {cmd} <שם משתמש באנגלית> [שם לתצוגה]")
+                return
+            pw = temp_password()
+            self.db.add_kid(parts[0], pw, parts[1] if len(parts) > 1 else parts[0],
+                            "master" if cmd == "/addmaster" else "kid", must_set=True)
+            self.reply(chat, f"נוסף {parts[0].lower()} עם סיסמה זמנית {pw}. בכניסה הראשונה תתבקש סיסמה אישית.")
+        elif cmd in ("/setpw", "/resetpw", "/disable", "/enable", "/rmkid"):
+            parts = arg.split()
+            if not parts or not self.db.kid(parts[0]) or (cmd == "/setpw" and len(parts) != 2):
+                usage = "שימוש: /setpw <משתמש> <סיסמה>" if cmd == "/setpw" else f"שימוש: {cmd} <משתמש>"
+                self.reply(chat, usage + "\n\n" + self.kids_text())
+                return
+            user = parts[0].lower()
+            if cmd == "/setpw":
+                self.db.set_password(user, parts[1])
+                self.reply(chat, f"🔑 הסיסמה של {user} עודכנה ל-{parts[1]}")
+            elif cmd == "/resetpw":
+                pw = temp_password()
+                self.db.set_password(user, pw, must_set=True)
+                self.reply(chat, f"🔑 סיסמה זמנית ל-{user}: {pw}. בכניסה הבאה תתבקש סיסמה אישית חדשה.")
+            elif cmd == "/disable":
+                self.db.x("UPDATE kids SET disabled=1 WHERE username=?", (user,))
+                locked = self.lock_kid(user)
+                self.reply(chat, f"⛔ {user} מושבת" + (f" (ננעל: {', '.join(locked)})" if locked else ""))
+            elif cmd == "/enable":
+                self.db.x("UPDATE kids SET disabled=0 WHERE username=?", (user,))
+                self.reply(chat, f"✅ {user} פעיל שוב")
+            else:
+                self.lock_kid(user)
+                self.db.x("DELETE FROM kids WHERE username=?", (user,))
+                self.reply(chat, f"🗑 {user} הוסר")
         else:
             self.reply(chat, HELP)
 
     def sites_text(self) -> str:
-        allow = self.db.sites("allow")
+        allow = [r["domain"] + (f" (זמני, עד {hhmm(r['expires'])})" if r["expires"] else "")
+                 for r in self.db.site_rows("allow")]
         block = self.db.sites("block")
-        return ("✅ אתרים מאושרים (במצב 'רק אתרים מאושרים'):\n" + ("\n".join(allow) or "—") +
-                "\n\n⛔ אתרים חסומים (תמיד):\n" + ("\n".join(block) or "—"))
+        return ("✅ אתרים מאושרים (במצב 'רק אתרים מאושרים'. אישור זמני גובר גם על חסימה):\n" +
+                ("\n".join(allow) or "—") + "\n\n⛔ אתרים חסומים (תמיד):\n" + ("\n".join(block) or "—"))
+
+    def kids_text(self) -> str:
+        lines = []
+        for k in self.db.q("SELECT * FROM kids ORDER BY role DESC, username"):
+            flags = []
+            if k["role"] == "master":
+                flags.append("👑 מאסטר")
+            if k["must_set"]:
+                flags.append("סיסמה זמנית, עוד לא נבחרה אישית")
+            if k["disabled"]:
+                flags.append("⛔ מושבת")
+            pw = k["pw_plain"] if k["pw_plain"] is not None else "לא ידועה"
+            lines.append(f"🧒 {k['display']} ({k['username']}) · סיסמה: {pw}" +
+                         (" · " + ", ".join(flags) if flags else ""))
+        return "\n".join(lines) or "אין חשבונות מוגדרים"
 
 
 HELP = """🛡️ HomeGuard – פקודות:
@@ -474,13 +653,24 @@ HELP = """🛡️ HomeGuard – פקודות:
 /lock <מחשב> – לנעול עכשיו (בלי שם = כל המחשבים)
 /extend <מחשב> <דקות> – להוסיף זמן
 /allow site.com – להוסיף לרשימת האתרים המאושרים
+/allow site.com 30 – לאשר אתר ל-30 דקות (גובר גם על חסימה)
 /unallow site.com – להסיר מהמאושרים
 /block site.com – לחסום אתר תמיד
 /unblock site.com – לבטל חסימה
 /sites – הרשימות
-/kids – רשימת הילדים
 
-בקשות כניסה מגיעות לכאן עם כפתורים: בוחרים סוג גישה ומשך זמן בלחיצה אחת."""
+👧 חשבונות:
+/kids – כל החשבונות והסיסמאות
+/addkid <משתמש> [שם] – ילד חדש עם סיסמה זמנית (בוחר/ת סיסמה אישית בכניסה הראשונה)
+/addmaster <משתמש> [שם] – חשבון מאסטר: בלי אישור, בלי סינון, בלי הגבלת זמן
+/setpw <משתמש> <סיסמה> – לקבוע סיסמה
+/resetpw <משתמש> – סיסמה זמנית חדשה
+/disable <משתמש> · /enable <משתמש> – להשבית / להחזיר חשבון
+/rmkid <משתמש> – למחוק חשבון
+/lock <משתמש> – לנעול את המחשב שבו הוא/היא מחובר/ת
+
+בקשות כניסה מגיעות לכאן עם כפתורים: בוחרים סוג גישה ומשך זמן בלחיצה אחת (♾️ = בלי הגבלת זמן, עד שנועלים).
+ילדים יכולים לבקש אתר מסוים מתוך הטיימר, ומקבלים כאן כפתורים לאשר אותו לזמן מוגבל או תמיד."""
 
 
 # ------------------------------------------------------------------- HTTP API
@@ -536,6 +726,11 @@ def make_handler(hg: HomeGuard):
                 self._send(200, {"ok": True})
             elif path == "/api/extend":
                 self._send(200, hg.request_extension(pc))
+            elif path == "/api/passwd":
+                self._send(200, hg.change_password(pc, str(body.get("username", "")), str(body.get("old", "")),
+                                                   str(body.get("new", ""))))
+            elif path == "/api/site":
+                self._send(200, hg.request_site(pc, str(body.get("domain", ""))))
             elif path == "/api/end":
                 hg.end_by_kid(pc)
                 self._send(200, {"ok": True})
@@ -560,6 +755,9 @@ def run(cfg: dict) -> None:
         {"command": "sites", "description": "רשימות אתרים"},
         {"command": "allow", "description": "אישור אתר"},
         {"command": "block", "description": "חסימת אתר"},
+        {"command": "kids", "description": "חשבונות וסיסמאות"},
+        {"command": "addkid", "description": "הוספת ילד"},
+        {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
         {"command": "help", "description": "עזרה"},
     ])
 
@@ -613,19 +811,25 @@ def cli(argv: list[str]) -> None:
         if argv[1] == "add" and len(argv) >= 4:
             db.add_kid(argv[2], argv[3], argv[4] if len(argv) > 4 else argv[2])
             print("נוסף:", argv[2])
+        elif argv[1] == "new" and len(argv) >= 3:
+            role = "master" if "--master" in argv else "kid"
+            args = [a for a in argv[2:] if a != "--master"]
+            pw = temp_password()
+            db.add_kid(args[0], pw, args[1] if len(args) > 1 else args[0], role, must_set=True)
+            print(f"נוסף: {args[0].lower()} ({role}), סיסמה זמנית: {pw}")
         elif argv[1] == "passwd" and len(argv) == 4:
-            db.add_kid(argv[2], argv[3], db.kid_display(argv[2].lower()))
-            print("הסיסמה עודכנה")
+            print("הסיסמה עודכנה" if db.set_password(argv[2], argv[3]) else "אין משתמש כזה")
         elif argv[1] == "remove" and len(argv) == 3:
             db.x("DELETE FROM kids WHERE username=?", (argv[2].lower(),))
             print("הוסר")
         elif argv[1] == "list":
-            for k in db.q("SELECT username, display FROM kids"):
-                print(k["username"], k["display"])
+            for k in db.q("SELECT username, display, role, must_set, disabled FROM kids"):
+                print(k["username"], k["display"], k["role"], "temp-pw" if k["must_set"] else "",
+                      "disabled" if k["disabled"] else "")
         else:
             print(__doc__)
-    elif argv[0] == "site" and len(argv) == 3 and argv[1] in ("allow", "block"):
-        db.add_site(argv[2], argv[1])
+    elif argv[0] == "site" and len(argv) in (3, 4) and argv[1] in ("allow", "block"):
+        db.add_site(argv[2], argv[1], int(argv[3]) if len(argv) == 4 else None)
         print("נוסף")
     elif argv[0] == "gen-token":
         print(secrets.token_urlsafe(32))

@@ -92,6 +92,29 @@ class LockScreen:
         self.login_btn = tk.Button(self.form, text="בקשו כניסה", font=(FONT, 15, "bold"), bg=ACCENT, fg="white",
                                    activebackground=ACCENT, relief="flat", width=18, command=self.login)
         self.login_btn.pack(pady=(8, 0), ipady=4)
+        tk.Button(self.form, text="שינוי סיסמה", font=(FONT, 11, "underline"), bg=BG, fg="#aab3c5",
+                  activebackground=BG, relief="flat", bd=0, cursor="hand2",
+                  command=lambda: self.show_set_password(self.user_var.get().strip())).pack(pady=(10, 0))
+
+        # Choose / change password: shown from the link above, or on a first login with a temporary password.
+        self.pw_form = tk.Frame(self.frame, bg=BG)
+        self.pw_vars = {}
+        for key, label in (("user", "שם משתמש"), ("old", "סיסמה נוכחית"), ("new", "סיסמה חדשה (לפחות 4 תווים)"),
+                           ("again", "שוב את הסיסמה החדשה")):
+            self.pw_vars[key] = tk.StringVar()
+            tk.Label(self.pw_form, text=label, font=(FONT, 13), fg=FG, bg=BG, anchor="e").pack(fill="x")
+            e = tk.Entry(self.pw_form, textvariable=self.pw_vars[key], show="" if key == "user" else "●",
+                         font=(FONT, 16), width=22, justify="center", relief="flat")
+            e.pack(pady=(2, 12), ipady=6)
+            e.bind("<Return>", lambda ev: self.save_password())
+            setattr(self, f"pw_entry_{key}", e)
+        buttons = tk.Frame(self.pw_form, bg=BG)
+        buttons.pack(pady=(8, 0))
+        tk.Button(buttons, text="שמירה", font=(FONT, 15, "bold"), bg=ACCENT, fg="white", activebackground=ACCENT,
+                  relief="flat", width=10, command=self.save_password).pack(side="right", padx=4, ipady=4)
+        tk.Button(buttons, text="חזרה", font=(FONT, 13), bg="#39445a", fg=FG, relief="flat", width=8,
+                  command=lambda: self.show_locked()).pack(side="right", padx=4, ipady=4)
+        self.login_after_pw = False
 
         self.cancel_btn = tk.Button(self.frame, text="ביטול", font=(FONT, 13), bg="#39445a", fg=FG,
                                     relief="flat", width=12, command=self.cancel)
@@ -105,10 +128,15 @@ class LockScreen:
         self.timer.configure(bg=BG)
         self.timer_label = tk.Label(self.timer, text="", font=(FONT, 14, "bold"), fg=FG, bg=BG, padx=10)
         self.timer_label.pack(side="right")
-        tk.Button(self.timer, text="עוד זמן", font=(FONT, 10), relief="flat", bg="#39445a", fg=FG,
-                  command=self.ask_more).pack(side="right", padx=2, pady=4)
+        self.more_btn = tk.Button(self.timer, text="עוד זמן", font=(FONT, 10), relief="flat", bg="#39445a", fg=FG,
+                                  command=self.ask_more)
+        self.more_btn.pack(side="right", padx=2, pady=4)
+        self.site_btn = tk.Button(self.timer, text="בקשת אתר", font=(FONT, 10), relief="flat", bg="#39445a",
+                                  fg=FG, command=self.ask_site)
+        self.site_btn.pack(side="right", padx=2, pady=4)
         tk.Button(self.timer, text="סיימתי", font=(FONT, 10), relief="flat", bg="#39445a", fg=FG,
                   command=self.done).pack(side="right", padx=(6, 2), pady=4)
+        self.site_dialog = None
         self.timer.withdraw()
         self._drag = (0, 0)
         self.timer_label.bind("<Button-1>", lambda e: setattr(self, "_drag", (e.x, e.y)))
@@ -141,15 +169,56 @@ class LockScreen:
         self.state = "locked"
         self.request_id = None
         self.timer.withdraw()
+        if self.site_dialog:
+            self.site_dialog.destroy()
+            self.site_dialog = None
         self.title.config(text="🛡️ המחשב נעול")
         self.subtitle.config(text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם")
         self.cancel_btn.pack_forget()
+        self.pw_form.pack_forget()
         self.form.pack(before=self.message)
         self.login_btn.config(state="normal")
         self.pass_var.set("")
         self.message.config(text=note)
         self.root.deiconify()
         self.user_entry.focus_set()
+
+    def show_set_password(self, user: str = "", old: str = "", display: str = ""):
+        """display set = first login with a temporary password: log in right after saving."""
+        self.state = "password"
+        self.login_after_pw = bool(display)
+        self.form.pack_forget()
+        self.title.config(text=f"שלום {display} 👋" if display else "שינוי סיסמה")
+        self.subtitle.config(text="בחרו סיסמה אישית שרק אתם תדעו" if display else
+                             "הכניסו את הסיסמה הנוכחית ובחרו סיסמה חדשה")
+        for key, value in (("user", user), ("old", old), ("new", ""), ("again", "")):
+            self.pw_vars[key].set(value)
+        self.message.config(text="")
+        self.pw_form.pack(before=self.message)
+        (self.pw_entry_new if user and old else self.pw_entry_user if not user else self.pw_entry_old).focus_set()
+
+    def save_password(self):
+        v = {k: var.get() for k, var in self.pw_vars.items()}
+        user = v["user"].strip()
+        if not user or not v["old"] or not v["new"]:
+            self.message.config(text="צריך למלא את כל השדות")
+            return
+        if v["new"] != v["again"]:
+            self.message.config(text="הסיסמאות החדשות לא זהות")
+            return
+        res = call("POST", "/passwd", {"username": user, "old": v["old"], "new": v["new"]})
+        if not res:
+            self.message.config(text="אין חיבור לשומר המחשב. נסו שוב עוד רגע.")
+        elif not res.get("ok"):
+            self.message.config(text=res.get("error", "שגיאה"))
+        elif self.login_after_pw:
+            self.show_locked()
+            self.user_var.set(user)
+            self.pass_var.set(v["new"])
+            self.login()
+        else:
+            self.show_locked("הסיסמה עודכנה ✔")
+            self.user_var.set(user)
 
     def show_waiting(self, display: str):
         self.state = "waiting"
@@ -179,6 +248,8 @@ class LockScreen:
         self.login_btn.config(state="normal")
         if not res:
             self.message.config(text="אין חיבור לשומר המחשב. נסו שוב עוד רגע.")
+        elif res.get("need_new_password"):
+            self.show_set_password(user, pw, res.get("display", user))
         elif not res.get("ok"):
             self.message.config(text=res.get("error", "שגיאה"))
             self.pass_var.set("")
@@ -194,6 +265,48 @@ class LockScreen:
     def ask_more(self):
         res = call("POST", "/extend", {})
         self.timer_label.config(text="ביקשנו עוד זמן ⏳" if res and res.get("ok") else "אין חיבור")
+
+    def ask_site(self):
+        if self.site_dialog:
+            self.site_dialog.lift()
+            return
+        d = self.site_dialog = tk.Toplevel(self.root)
+        d.title("בקשת אתר")
+        d.configure(bg=BG)
+        d.attributes("-topmost", True)
+        d.resizable(False, False)
+        tk.Label(d, text="איזה אתר? (למשל scratch.mit.edu)", font=(FONT, 12), fg=FG, bg=BG).pack(padx=16, pady=(12, 4))
+        var = tk.StringVar()
+        e = tk.Entry(d, textvariable=var, font=(FONT, 14), width=28, justify="center", relief="flat")
+        e.pack(padx=16, pady=4, ipady=4)
+        note = tk.Label(d, text="", font=(FONT, 11), fg="#ffb4a8", bg=BG)
+        note.pack()
+
+        def close():
+            self.site_dialog = None
+            d.destroy()
+
+        def send(_=None):
+            if not var.get().strip():
+                return
+            res = call("POST", "/site", {"domain": var.get().strip()})
+            if res and res.get("ok"):
+                self.timer_label.config(text="ביקשנו את האתר 🌐")
+                close()
+            else:
+                note.config(text=(res or {}).get("error", "אין חיבור"))
+
+        e.bind("<Return>", send)
+        d.protocol("WM_DELETE_WINDOW", close)
+        row = tk.Frame(d, bg=BG)
+        row.pack(pady=(4, 12))
+        tk.Button(row, text="שליחה לאבא/אמא", font=(FONT, 11, "bold"), bg=ACCENT, fg="white", relief="flat",
+                  command=send).pack(side="right", padx=4)
+        tk.Button(row, text="ביטול", font=(FONT, 11), bg="#39445a", fg=FG, relief="flat",
+                  command=close).pack(side="right", padx=4)
+        d.update_idletasks()
+        d.geometry(f"+{(d.winfo_screenwidth() - d.winfo_width()) // 2}+{d.winfo_screenheight() // 3}")
+        e.focus_force()
 
     def done(self):
         call("POST", "/end", {})
@@ -226,6 +339,13 @@ class LockScreen:
         self.root.after(2000, self.poll)
 
     def update_timer(self, session: dict, extend_pending: bool):
+        if session.get("unlimited"):
+            self.more_btn.pack_forget()
+            self.timer.configure(bg=BG)
+            self.timer_label.config(text="♾️ ללא הגבלת זמן", bg=BG)
+            return
+        if not self.more_btn.winfo_ismapped():
+            self.more_btn.pack(side="right", padx=2, pady=4, before=self.site_btn)
         rem = session["remaining"]
         text = f"⏱ {mmss(rem)}"
         if extend_pending:

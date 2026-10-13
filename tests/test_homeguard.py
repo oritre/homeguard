@@ -22,6 +22,9 @@ import dnsfilter  # noqa: E402
 import homeguard_agent  # noqa: E402
 import homeguard_server as hs  # noqa: E402
 
+# Never touch the real firewall/DNS of the machine running the tests (on Windows too).
+homeguard_agent.winctl.IS_WIN = False
+
 
 def free_port():
     with socket.socket() as s:
@@ -126,6 +129,103 @@ class ServerTest(unittest.TestCase):
         self.hg.handle_update({"callback_query": {"id": "c", "from": {"id": 2, "first_name": "W"},
                                                   "message": {"chat": {"id": 2}}, "data": "lk:salon"}})
         self.assertIsNone(self.hg.state("salon")["session"])
+
+    def cmd(self, text):
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": text}})
+        return self.tg.sent()[-1]["text"]
+
+    def test_temp_password_then_kid_picks_own(self):
+        self.assertIn("סיסמה זמנית", self.cmd("/addkid Reei רעי"))
+        temp = self.db.kid("reei")["pw_plain"]
+        res = self.hg.login("salon", "reei", temp)
+        self.assertTrue(res["need_new_password"])
+        self.assertEqual(self.db.q("SELECT COUNT(*) c FROM requests")[0]["c"], 0)  # no request until it's set
+        self.assertFalse(self.hg.change_password("salon", "reei", temp, "12")["ok"])  # too short
+        self.assertTrue(self.hg.change_password("salon", "reei", temp, "secret9")["ok"])
+        self.assertIn("secret9", self.tg.sent()[-1]["text"])  # parents get the new password
+        self.assertIn("secret9", self.cmd("/kids"))
+        self.assertTrue(self.hg.login("salon", "reei", "secret9")["request_id"])
+        self.assertFalse(self.hg.change_password("salon", "reei", "wrong", "abcd")["ok"])
+
+    def test_parent_account_controls(self):
+        self.cmd("/setpw noam 9999")
+        self.assertTrue(self.hg.login("salon", "noam", "9999")["ok"])
+        self.cmd("/disable noam")
+        self.assertIn("מושבת", self.hg.login("salon", "noam", "9999")["error"])
+        self.cmd("/enable noam")
+        self.cmd("/resetpw noam")
+        self.assertTrue(self.hg.login("salon", "noam", self.db.kid("noam")["pw_plain"])["need_new_password"])
+        self.cmd("/rmkid noam")
+        self.assertIsNone(self.db.kid("noam"))
+
+    def test_disable_locks_running_session(self):
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        self.hg.decide(f"ap:{rid}:full:30", "אורי")
+        self.cmd("/disable noam")
+        self.assertIsNone(self.hg.state("salon")["session"])
+
+    def test_master_gets_open_unlimited_without_approval(self):
+        self.db.add_kid("hagit", "pw12", "חגית", "master")
+        res = self.hg.login("salon", "hagit", "pw12")
+        self.assertTrue(res["approved"])
+        s = self.hg.state("salon")["session"]
+        self.assertEqual((s["mode"], s["unlimited"]), ("open", True))
+        self.assertEqual(self.tg.sent("sendMessage")[-1].get("reply_markup"), None)  # just a notice
+        self.hg.tick()
+        self.assertIsNotNone(self.hg.state("salon")["session"])
+        self.cmd("/lock hagit")
+        self.assertIsNone(self.hg.state("salon")["session"])
+
+    def test_unlimited_full_internet(self):
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        buttons = [b["callback_data"] for row in self.tg.sent()[0]["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertIn(f"ap:{rid}:full:0", buttons)
+        self.assertNotIn(f"ap:{rid}:offline:0", buttons)
+        self.hg.decide(f"ap:{rid}:full:0", "אורי")
+        self.assertTrue(self.hg.state("salon")["session"]["unlimited"])
+        self.assertIn("ללא הגבלת זמן", self.hg.status_text())
+
+    def test_temporary_site_overrides_block_then_expires(self):
+        self.cmd("/block youtube.com")
+        self.cmd("/allow youtube.com 30")
+        st = self.hg.state("salon")
+        self.assertIn("youtube.com", st["allowlist"])
+        self.assertNotIn("youtube.com", st["blocklist"])
+        self.assertIn("זמני", self.cmd("/sites"))
+        self.db.x("UPDATE sites SET expires=? WHERE list='allow'", (time.time() - 1,))
+        self.hg.tick()
+        st = self.hg.state("salon")
+        self.assertNotIn("youtube.com", st["allowlist"])
+        self.assertIn("youtube.com", st["blocklist"])
+        # a permanent allow replaces the block
+        self.cmd("/allow youtube.com")
+        self.assertEqual(self.db.sites("block"), [])
+
+    def test_kid_requests_site(self):
+        self.assertFalse(self.hg.request_site("salon", "scratch.mit.edu")["ok"])  # no active session
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        self.hg.decide(f"ap:{rid}:allowlist:60", "אורי")
+        self.assertFalse(self.hg.request_site("salon", "not a site")["ok"])
+        self.assertTrue(self.hg.request_site("salon", "https://Scratch.mit.edu/projects")["ok"])
+        self.hg.request_site("salon", "scratch.mit.edu")  # duplicate while pending
+        site_req = self.db.q("SELECT id FROM requests WHERE kind='site'")
+        self.assertEqual(len(site_req), 1)
+        self.assertEqual(self.hg.decide(f"st:{site_req[0]['id']}:30", "אורי"), "אושר")
+        self.assertIn("scratch.mit.edu", self.hg.state("salon")["allowlist"])
+        self.assertIsNotNone(self.db.site_rows("allow")[0]["expires"])
+
+    def test_old_database_is_migrated(self):
+        import sqlite3
+        path = os.path.join(self.tmp, "old")
+        con = sqlite3.connect(path)
+        con.executescript("CREATE TABLE kids (username TEXT PRIMARY KEY, display TEXT NOT NULL, "
+                          "salt TEXT NOT NULL, pw_hash TEXT NOT NULL);"
+                          "CREATE TABLE sites (domain TEXT NOT NULL, list TEXT NOT NULL, PRIMARY KEY (domain, list));")
+        con.close()
+        db = hs.DB(path)
+        db.add_kid("a", "1234", "A")
+        db.add_site("x.com", "allow", 5)
+        self.assertEqual(db.kid("a")["role"], "kid")
 
 
 class DnsTest(unittest.TestCase):
@@ -245,6 +345,30 @@ class AgentEndToEnd(unittest.TestCase):
         self.agent.poll_once()
         self.assertEqual(self.agent.mode, "offline")
         self.assertIsNone(self.local_call("GET", "/state")["session"])
+
+    def test_master_login_opens_dns_immediately(self):
+        self.hg.db.add_kid("hagit", "pw12", "חגית", "master")
+        self.agent.poll_once()
+        res = self.local_call("POST", "/login", {"username": "hagit", "password": "pw12"})
+        self.assertTrue(res["approved"])
+        self.assertEqual(self.agent.mode, "open")
+        self.assertTrue(self.agent.dns_decide("anything.example"))
+        self.assertTrue(self.local_call("GET", "/state")["session"]["unlimited"])
+
+    def test_password_and_site_through_local_api(self):
+        self.hg.db.add_kid("iftach", "0000", "יפתח", must_set=True)
+        self.assertTrue(self.local_call("POST", "/login", {"username": "iftach", "password": "0000"})
+                        ["need_new_password"])
+        self.assertTrue(self.local_call("POST", "/passwd", {"username": "iftach", "old": "0000", "new": "abcd"})["ok"])
+        res = self.local_call("POST", "/login", {"username": "iftach", "password": "abcd"})
+        self.hg.decide(f"ap:{res['request_id']}:allowlist:60", "אורי")
+        self.agent.poll_once()
+        self.assertFalse(self.agent.dns_decide("scratch.mit.edu"))
+        self.assertTrue(self.local_call("POST", "/site", {"domain": "scratch.mit.edu"})["ok"])
+        rid = self.hg.db.q("SELECT id FROM requests WHERE kind='site'")[0]["id"]
+        self.hg.decide(f"st:{rid}:30", "אורי")
+        self.agent.poll_once()
+        self.assertTrue(self.agent.dns_decide("scratch.mit.edu"))
 
     def test_parent_is_exempt(self):
         self.user = "ori"
