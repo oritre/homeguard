@@ -1,0 +1,16 @@
+# systemd unit for running the HomeGuard server on Linux / Raspberry Pi.
+# sudo cp -r server /opt/homeguard && sudo cp homeguard-server.service /etc/systemd/system/
+# sudo systemctl enable --now homeguard-server
+[Unit]
+Description=HomeGuard parental-control server (Telegram bot + agent API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=HOMEGUARD_CONFIG=/opt/homeguard/config.json
+ExecStart=/usr/bin/python3 /opt/homeguard/homeguard_server.py run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

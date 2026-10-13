@@ -1,0 +1,11 @@
+{
+  "telegram_token": "123456:ABC-from-BotFather",
+  "parent_chat_ids": [111111111, 222222222],
+  "agent_token": "run: python homeguard_server.py gen-token",
+  "listen": "0.0.0.0",
+  "port": 8800,
+  "db": "homeguard.db",
+  "durations": [30, 60, 120],
+  "extend_options": [15, 30, 60],
+  "max_failed_logins": 5
+}
