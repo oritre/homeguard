@@ -69,7 +69,8 @@ class ServerTest(unittest.TestCase):
         msgs = self.tg.sent()
         self.assertEqual([m["chat_id"] for m in msgs], [1, 2])
         buttons = [b["callback_data"] for row in msgs[0]["reply_markup"]["inline_keyboard"] for b in row]
-        self.assertIn(f"ap:{res['request_id']}:full:60", buttons)
+        self.assertIn(f"ap:{res['request_id']}:allowlist:60", buttons)
+        self.assertNotIn(f"ap:{res['request_id']}:full:60", buttons)  # default: approved sites only
         self.assertIn(f"dn:{res['request_id']}", buttons)
 
     def test_wrong_password(self):
@@ -178,6 +179,7 @@ class ServerTest(unittest.TestCase):
         self.assertIsNone(self.hg.state("salon")["session"])
 
     def test_unlimited_full_internet(self):
+        self.db.set_setting("full_internet", "1")
         rid = self.hg.login("salon", "noam", "1234")["request_id"]
         buttons = [b["callback_data"] for row in self.tg.sent()[0]["reply_markup"]["inline_keyboard"] for b in row]
         self.assertIn(f"ap:{rid}:full:0", buttons)
@@ -227,6 +229,78 @@ class ServerTest(unittest.TestCase):
         db.add_kid("a", "1234", "A")
         db.add_site("x.com", "allow", 5)
         self.assertEqual(db.kid("a")["role"], "kid")
+
+
+class SiteApprovalTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.db.add_kid("reei", "1111", "רעי")
+        self.tg = FakeTelegram()
+        self.hg = hs.HomeGuard(cfg, self.db, self.tg)
+        rid = self.hg.login("salon", "reei", "")["request_id"]
+        self.hg.decide(f"ap:{rid}:allowlist:60", "אורי")
+
+    def ask(self, domain="scratch.mit.edu"):
+        self.assertTrue(self.hg.request_site("salon", domain)["ok"])
+        return self.db.q("SELECT id FROM requests WHERE kind='site' ORDER BY id DESC")[0]["id"]
+
+    def cmd(self, text):
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": text}})
+        return self.tg.sent()[-1]["text"]
+
+    def test_buttons(self):
+        rid = self.ask()
+        buttons = [b["callback_data"] for row in self.tg.sent()[-1]["reply_markup"]["inline_keyboard"] for b in row]
+        for data in (f"st:{rid}:s", f"st:{rid}:30", f"st:{rid}:0", f"cs:{rid}", f"dn:{rid}"):
+            self.assertIn(data, buttons)
+
+    def test_until_session_end_follows_extension_and_lock(self):
+        rid = self.ask()
+        self.assertEqual(self.hg.decide(f"st:{rid}:s", "אורי"), "אושר")
+        self.assertIn("scratch.mit.edu", self.hg.state("salon")["allowlist"])
+        self.assertIn("סוף הזמן", self.cmd("/sites"))
+        self.hg.extend("salon", 30)
+        row = self.db.q("SELECT expires FROM sites")[0]
+        self.assertAlmostEqual(row["expires"], self.db.active_session("salon")["ends"], delta=1)
+        self.hg.lock("salon")
+        self.assertNotIn("scratch.mit.edu", self.hg.state("salon")["allowlist"])
+        self.hg.tick()
+        self.assertEqual(self.db.q("SELECT * FROM sites"), [])
+
+    def test_until_clock_time(self):
+        rid = self.ask()
+        self.hg.handle_update({"callback_query": {"id": "c", "from": {"id": 1, "first_name": "אורי"},
+                                                  "message": {"chat": {"id": 1}}, "data": f"cs:{rid}"}})
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "2 שעות"}})
+        row = self.db.q("SELECT expires, session_id FROM sites")[0]
+        self.assertIsNone(row["session_id"])
+        self.assertAlmostEqual(row["expires"], time.time() + 7200, delta=5)
+
+    def test_permanent_survives_session(self):
+        self.hg.decide(f"st:{self.ask()}:0", "אורי")
+        self.hg.lock("salon")
+        self.assertIn("scratch.mit.edu", self.hg.state("salon")["allowlist"])
+
+    def test_parent_allow_command(self):
+        self.cmd("/allow a.com b.com 18:30")
+        rows = self.db.site_rows("allow")
+        self.assertEqual([r["domain"] for r in rows], ["a.com", "b.com"])
+        self.assertTrue(all(r["expires"] for r in rows))
+        self.cmd("/allow c.com 1.5 שעות")
+        self.assertAlmostEqual(self.db.q("SELECT expires FROM sites WHERE domain='c.com'")[0]["expires"],
+                               time.time() + 5400, delta=5)
+        self.assertIn("לא הבנתי", self.cmd("/allow d.com מחר"))
+        self.cmd("/allow e.com")
+        self.assertIsNone(self.db.q("SELECT expires FROM sites WHERE domain='e.com'")[0]["expires"])
+
+    def test_fullnet_toggle(self):
+        self.assertIn("ברירת מחדל", self.cmd("/fullnet"))
+        self.cmd("/fullnet on")
+        rid = self.hg.login("salon", "reei", "")["request_id"]
+        buttons = [b["callback_data"] for row in self.tg.sent()[-1]["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertIn(f"ap:{rid}:full:60", buttons)
 
 
 class PasswordlessTest(unittest.TestCase):

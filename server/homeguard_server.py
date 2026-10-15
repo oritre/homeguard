@@ -44,6 +44,7 @@ MODES = {
     "open": "🔓 פתוח לגמרי (מאסטר)",
 }
 MODE_SHORT = {"full": "🌐", "allowlist": "✅", "offline": "🚫", "open": "🔓"}
+MODE_NAMES = {"full": "אינטרנט מלא", "allowlist": "רק אתרים מאושרים", "offline": "בלי אינטרנט"}
 FOREVER = 4102444800.0  # 2100-01-01: sessions that end only when someone locks them
 
 DEFAULT_CONFIG = {
@@ -166,6 +167,7 @@ class DB:
                                      ("kids", "must_set", "INTEGER NOT NULL DEFAULT 0"),
                                      ("kids", "disabled", "INTEGER NOT NULL DEFAULT 0"),
                                      ("sites", "expires", "REAL"),
+                                     ("sites", "session_id", "INTEGER"),
                                      ("requests", "detail", "TEXT")):
                 if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -224,23 +226,31 @@ class DB:
 
     # sites
     def site_rows(self, lst: str) -> list[sqlite3.Row]:
-        return self.q("SELECT domain, expires FROM sites WHERE list=? AND (expires IS NULL OR expires>?) "
+        """Live entries: not expired, and a 'for this session' approval only while that session runs."""
+        return self.q("SELECT domain, expires, session_id FROM sites WHERE list=? AND (expires IS NULL OR expires>?) "
+                      "AND (session_id IS NULL OR session_id IN (SELECT id FROM sessions WHERE active=1)) "
                       "ORDER BY domain", (lst, time.time()))
 
     def sites(self, lst: str) -> list[str]:
         return [r["domain"] for r in self.site_rows(lst)]
 
-    def add_site(self, domain: str, lst: str, minutes: int | None = None) -> None:
-        """minutes=None: permanent, and replaces the opposite list's entry.
+    def add_site(self, domain: str, lst: str, minutes: int | None = None, session=None) -> None:
+        """minutes=None and no session: permanent, and replaces the opposite list's entry.
+        session: allowed until that session ends (follows its extensions, gone when it is locked).
         A temporary allow keeps any block and overrides it until it expires."""
         d = normalize_domain(domain)
-        if minutes:
-            self.x("INSERT INTO sites (domain, list, expires) VALUES (?,?,?) ON CONFLICT(domain, list) DO UPDATE "
-                   "SET expires=CASE WHEN expires IS NULL THEN NULL ELSE MAX(expires, excluded.expires) END",
-                   (d, lst, time.time() + minutes * 60))
+        if minutes or session is not None:
+            expires = session["ends"] if session is not None else time.time() + minutes * 60
+            sid = session["id"] if session is not None else None
+            self.x("INSERT INTO sites (domain, list, expires, session_id) VALUES (?,?,?,?) "
+                   "ON CONFLICT(domain, list) DO UPDATE SET "
+                   "session_id=CASE WHEN expires IS NULL THEN NULL WHEN excluded.expires>=expires "
+                   "THEN excluded.session_id ELSE session_id END, "
+                   "expires=CASE WHEN expires IS NULL THEN NULL ELSE MAX(expires, excluded.expires) END",
+                   (d, lst, expires, sid))
             return
-        self.x("INSERT INTO sites (domain, list, expires) VALUES (?,?,NULL) "
-               "ON CONFLICT(domain, list) DO UPDATE SET expires=NULL", (d, lst))
+        self.x("INSERT INTO sites (domain, list, expires, session_id) VALUES (?,?,NULL,NULL) "
+               "ON CONFLICT(domain, list) DO UPDATE SET expires=NULL, session_id=NULL", (d, lst))
         self.x("DELETE FROM sites WHERE domain=? AND list=?", (d, "block" if lst == "allow" else "allow"))
 
     def remove_site(self, domain: str, lst: str) -> None:
@@ -253,6 +263,10 @@ class DB:
 
     def end_sessions(self, pc: str) -> None:
         self.x("UPDATE sessions SET active=0, ends=MIN(ends, ?) WHERE pc=? AND active=1", (time.time(), pc))
+
+    def set_session_end(self, sid: int, ends: float) -> None:
+        self.x("UPDATE sessions SET ends=?, warned=0 WHERE id=?", (ends, sid))
+        self.x("UPDATE sites SET expires=? WHERE session_id=?", (ends, sid))
 
     def start_session(self, pc: str, kid: str, mode: str, minutes: int) -> tuple[int, float]:
         """minutes <= 0: no time limit, until someone locks it."""
@@ -360,19 +374,26 @@ class HomeGuard:
             self.edit_all(json.loads(old["messages"]), f"↩️ בקשה בוטלה ({self.db.kid_display(old['kid'])}, {pc})")
         rid = self.db.x("INSERT INTO requests (kind, pc, kid, created) VALUES ('login',?,?,?)", (pc, name, now))
         kb = []
-        for mode in ("full", "allowlist", "offline"):
+        modes = self.login_modes()
+        for mode in modes:
             options = list(self.cfg["durations"]) + ([0] if mode != "offline" else [])
             kb.append([{"text": f"{MODE_SHORT[mode]} {fmt_min(m) if m else '♾️'}",
                         "callback_data": f"ap:{rid}:{mode}:{m}"} for m in options])
         kb.append([{"text": f"⏱ זמן אחר {MODE_SHORT[mode]}", "callback_data": f"cu:{rid}:{mode}"}
-                   for mode in ("full", "allowlist", "offline")])
+                   for mode in modes])
         kb.append([{"text": "❌ לא עכשיו", "callback_data": f"dn:{rid}"}])
-        text = (f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})\n"
-                f"{MODE_SHORT['full']} אינטרנט מלא · {MODE_SHORT['allowlist']} אתרים מאושרים · "
-                f"{MODE_SHORT['offline']} בלי אינטרנט · ♾️ ללא הגבלת זמן")
+        text = (f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})\n" +
+                " · ".join(f"{MODE_SHORT[m]} {MODE_NAMES[m]}" for m in modes) + " · ♾️ ללא הגבלת זמן")
         msgs = self.notify(text, kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True, "request_id": rid, "display": kid["display"]}
+
+    def full_internet_allowed(self) -> bool:
+        return self.db.setting("full_internet", "0") == "1"
+
+    def login_modes(self) -> tuple:
+        """Default: only approved sites (or no internet). Full internet only after /fullnet on."""
+        return ("allowlist", "full", "offline") if self.full_internet_allowed() else ("allowlist", "offline")
 
     def passwords_required(self) -> bool:
         return self.db.setting("require_password", "0") == "1"
@@ -417,8 +438,10 @@ class HomeGuard:
             return {"ok": True}
         rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, session_id, detail) VALUES ('site',?,?,?,?,?)",
                         (pc, s["kid"], time.time(), s["id"], d))
-        kb = [[{"text": fmt_min(m), "callback_data": f"st:{rid}:{m}"} for m in self.cfg["durations"]],
-              [{"text": "♾️ תמיד", "callback_data": f"st:{rid}:0"}, {"text": "❌ לא", "callback_data": f"dn:{rid}"}]]
+        kb = [[{"text": f"🧒 עד סוף הזמן שלו/ה ({until(s['ends'])})", "callback_data": f"st:{rid}:s"}],
+              [{"text": fmt_min(m), "callback_data": f"st:{rid}:{m}"} for m in self.cfg["durations"]],
+              [{"text": "⏱ זמן/שעה אחרת", "callback_data": f"cs:{rid}"}, {"text": "♾️ תמיד", "callback_data": f"st:{rid}:0"}],
+              [{"text": "❌ לא", "callback_data": f"dn:{rid}"}]]
         msgs = self.notify(f"🌐 {self.db.kid_display(s['kid'])} מבקש/ת גישה לאתר {d} (מחשב '{pc}')", kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True}
@@ -495,10 +518,19 @@ class HomeGuard:
             self.edit_all(msgs, f"✅ {display} ({r['pc']}): {MODES[mode]} {length} · אושר ע\"י {who}")
             return "אושר"
         if kind == "st":
-            minutes = int(parts[2])
-            self.db.add_site(r["detail"], "allow", minutes or None)
+            if parts[2] == "s":
+                s = self.db.q("SELECT * FROM sessions WHERE id=? AND active=1", (r["session_id"],))
+                if not s or s[0]["ends"] <= time.time():
+                    self.db.x("UPDATE requests SET status='cancelled' WHERE id=?", (rid,))
+                    self.edit_all(msgs, f"↩️ {display} ({r['pc']}): הזמן כבר נגמר")
+                    return "הזמן כבר נגמר"
+                self.db.add_site(r["detail"], "allow", session=s[0])
+                length = f"עד סוף הזמן ({until(s[0]['ends'])})"
+            else:
+                minutes = int(parts[2])
+                self.db.add_site(r["detail"], "allow", minutes or None)
+                length = "תמיד" if minutes <= 0 else f"ל{fmt_min(minutes)}, עד {hhmm(time.time() + minutes * 60)}"
             self.db.x("UPDATE requests SET status='approved', decided_by=? WHERE id=?", (who, rid))
-            length = "תמיד" if minutes <= 0 else f"ל{fmt_min(minutes)}"
             self.edit_all(msgs, f"🌐 {r['detail']} אושר {length} ({display}, {r['pc']}) · {who}")
             return "אושר"
         if kind == "ex":
@@ -509,7 +541,7 @@ class HomeGuard:
                 self.edit_all(msgs, f"↩️ {display} ({r['pc']}): הזמן כבר נגמר")
                 return "הזמן כבר נגמר"
             new_end = max(s[0]["ends"], time.time()) + minutes * 60
-            self.db.x("UPDATE sessions SET ends=?, warned=0 WHERE id=?", (new_end, s[0]["id"]))
+            self.db.set_session_end(s[0]["id"], new_end)
             self.db.x("UPDATE requests SET status='approved', decided_by=? WHERE id=?", (who, rid))
             self.edit_all(msgs, f"⏳ {display} ({r['pc']}): +{fmt_min(minutes)}, {until(new_end)} · {who}")
             return "הוארך"
@@ -531,7 +563,7 @@ class HomeGuard:
         s = self.db.active_session(pc)
         if not s:
             return False
-        self.db.x("UPDATE sessions SET ends=?, warned=0 WHERE id=?", (max(s["ends"], time.time()) + minutes * 60, s["id"]))
+        self.db.set_session_end(s["id"], max(s["ends"], time.time()) + minutes * 60)
         return True
 
     def status_text(self) -> str:
@@ -563,6 +595,8 @@ class HomeGuard:
         for site in self.db.q("SELECT domain FROM sites WHERE expires IS NOT NULL AND expires<=?", (now,)):
             self.notify(f"⌛ הגישה הזמנית ל-{site['domain']} הסתיימה")
         self.db.x("DELETE FROM sites WHERE expires IS NOT NULL AND expires<=?", (now,))
+        self.db.x("DELETE FROM sites WHERE session_id IS NOT NULL AND session_id NOT IN "
+                  "(SELECT id FROM sessions WHERE active=1)")
         self.db.x("DELETE FROM failed_logins WHERE ts<?", (now - 3600,))
 
     # ---- Telegram update handling
@@ -574,7 +608,7 @@ class HomeGuard:
                 return
             who = cq["from"].get("first_name", "הורה")
             data = cq.get("data", "")
-            if data.startswith(("cu:", "cx:")):
+            if data.startswith(("cu:", "cx:", "cs:")):
                 answer = self.ask_custom_time(chat, data)
             elif data.startswith("lk:"):
                 pc = data[3:]
@@ -624,6 +658,8 @@ class HomeGuard:
         parts = data.split(":")
         if parts[0] == "cu":
             result = self.decide(f"ap:{parts[1]}:{parts[2]}:{minutes}", "הורה")
+        elif parts[0] == "cs":
+            result = self.decide(f"st:{parts[1]}:{minutes}", "הורה")
         else:
             result = self.decide(f"ex:{parts[1]}:{minutes}", "הורה")
         self.reply(chat, f"{result} ({fmt_min(minutes)})")
@@ -658,8 +694,19 @@ class HomeGuard:
                 return
             lst = "allow" if "allow" in cmd else "block"
             words = arg.replace(",", " ").split()
-            minutes = int(words.pop()) if cmd == "/allow" and len(words) > 1 and words[-1].isdigit() else None
-            for d in words:
+            domains = [w for w in words if valid_domain(normalize_domain(w)) and not re.fullmatch(r"[\d.]+", w)]
+            rest = " ".join(w for w in words if w not in domains)
+            minutes = None
+            if cmd == "/allow" and rest:
+                minutes = parse_duration(rest)
+                if not minutes:
+                    self.reply(chat, "לא הבנתי את הזמן 🙂 למשל: /allow site.com 30 · /allow site.com 2 שעות · "
+                                     "/allow site.com 18:30")
+                    return
+            if not domains:
+                self.reply(chat, f"שימוש: {cmd} example.com")
+                return
+            for d in domains:
                 if cmd.startswith("/un"):
                     self.db.remove_site(d, lst)
                 else:
@@ -667,6 +714,12 @@ class HomeGuard:
             self.reply(chat, self.sites_text())
         elif cmd == "/sites":
             self.reply(chat, self.sites_text())
+        elif cmd == "/fullnet":
+            if arg in ("on", "off"):
+                self.db.set_setting("full_internet", "1" if arg == "on" else "0")
+            self.reply(chat, "🌐 אפשר לאשר גם אינטרנט מלא (בנוסף לאתרים מאושרים)" if self.full_internet_allowed() else
+                       "✅ ברירת מחדל: כל האתרים חסומים חוץ מאתרים שאישרתם. אינטרנט מלא לא מוצע בבקשות.\n"
+                       "לשינוי: /fullnet on או /fullnet off")
         elif cmd == "/passwords":
             if arg in ("on", "off"):
                 self.db.set_setting("require_password", "1" if arg == "on" else "0")
@@ -713,7 +766,9 @@ class HomeGuard:
             self.reply(chat, HELP)
 
     def sites_text(self) -> str:
-        allow = [r["domain"] + (f" (זמני, עד {hhmm(r['expires'])})" if r["expires"] else "")
+        allow = [r["domain"] + ("" if not r["expires"] else
+                                f" (עד סוף הזמן של הילד, {until(r['expires'])})" if r["session_id"] else
+                                f" (זמני, עד {hhmm(r['expires'])})")
                  for r in self.db.site_rows("allow")]
         block = self.db.sites("block")
         return ("✅ אתרים מאושרים (במצב 'רק אתרים מאושרים'. אישור זמני גובר גם על חסימה):\n" +
@@ -739,8 +794,10 @@ HELP = """🛡️ HomeGuard – פקודות:
 /status – מי מחובר ולכמה זמן
 /lock <מחשב> – לנעול עכשיו (בלי שם = כל המחשבים)
 /extend <מחשב> <דקות> – להוסיף זמן
-/allow site.com – להוסיף לרשימת האתרים המאושרים
-/allow site.com 30 – לאשר אתר ל-30 דקות (גובר גם על חסימה)
+✅ ברירת מחדל: כל האתרים חסומים, נכנסים רק לאתרים מאושרים
+/allow site.com – לאשר אתר תמיד
+/allow site.com 30 · 2 שעות · 18:30 – לאשר לזמן מוגבל או עד שעה (גובר גם על חסימה)
+/fullnet on|off – להציע גם "אינטרנט מלא" בבקשות כניסה (ברירת מחדל: לא)
 /unallow site.com – להסיר מהמאושרים
 /block site.com – לחסום אתר תמיד
 /unblock site.com – לבטל חסימה
@@ -759,7 +816,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 /lock <משתמש> – לנעול את המחשב שבו הוא/היא מחובר/ת
 
 בקשות כניסה מגיעות לכאן עם כפתורים: בוחרים סוג גישה ומשך זמן בלחיצה אחת (♾️ = בלי הגבלת זמן, עד שנועלים).
-ילדים יכולים לבקש אתר מסוים מתוך הטיימר, ומקבלים כאן כפתורים לאשר אותו לזמן מוגבל או תמיד."""
+ילדים יכולים לבקש אתר מסוים מתוך הטיימר. אפשר לאשר אותו עד סוף הזמן שלהם, לזמן קצוב, עד שעה מסוימת או תמיד."""
 
 
 # ------------------------------------------------------------------- HTTP API
@@ -846,6 +903,7 @@ def run(cfg: dict) -> None:
         {"command": "sites", "description": "רשימות אתרים"},
         {"command": "allow", "description": "אישור אתר"},
         {"command": "block", "description": "חסימת אתר"},
+        {"command": "fullnet", "description": "להציע גם אינטרנט מלא"},
         {"command": "kids", "description": "חשבונות וסיסמאות"},
         {"command": "addkid", "description": "הוספת ילד"},
         {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
