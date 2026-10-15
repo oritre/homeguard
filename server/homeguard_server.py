@@ -131,6 +131,8 @@ class DB:
                 CREATE TABLE IF NOT EXISTS sites (
                     domain TEXT NOT NULL, list TEXT NOT NULL,
                     PRIMARY KEY (domain, list));
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS failed_logins (
                     pc TEXT NOT NULL, ts REAL NOT NULL);
                 """
@@ -184,6 +186,13 @@ class DB:
         if row and hmac.compare_digest(row["pw_hash"], self._hash(password, row["salt"])):
             return row
         return None
+
+    def setting(self, key: str, default: str = "") -> str:
+        rows = self.q("SELECT value FROM settings WHERE key=?", (key,))
+        return rows[0]["value"] if rows else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.x("INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def kid_display(self, username: str) -> str:
         rows = self.q("SELECT display FROM kids WHERE username=?", (username,))
@@ -298,6 +307,11 @@ class HomeGuard:
         if recent >= self.cfg["max_failed_logins"]:
             return {"ok": False, "error": "יותר מדי ניסיונות. נסו שוב בעוד כמה דקות."}
         kid = self.db.check_kid(username, password)
+        if not kid and not self.passwords_required():
+            # Passwordless mode: a kid only picks their name; the parents' approval is the check.
+            k = self.db.kid(username.strip().lower())
+            if k and k["role"] != "master":
+                kid = k
         if not kid:
             self.db.x("INSERT INTO failed_logins VALUES (?,?)", (pc, now))
             if recent + 1 == self.cfg["max_failed_logins"]:
@@ -307,7 +321,7 @@ class HomeGuard:
         name = kid["username"]
         if kid["disabled"]:
             return {"ok": False, "error": "החשבון מושבת. דברו עם אבא/אמא."}
-        if kid["must_set"]:
+        if kid["must_set"] and self.passwords_required():
             return {"ok": False, "need_new_password": True, "display": kid["display"]}
         if kid["role"] == "master":
             self.db.start_session(pc, name, "open", 0)
@@ -332,6 +346,15 @@ class HomeGuard:
         msgs = self.notify(text, kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True, "request_id": rid, "display": kid["display"]}
+
+    def passwords_required(self) -> bool:
+        return self.db.setting("require_password", "0") == "1"
+
+    def kids_for_lock_screen(self) -> dict:
+        kids = [{"username": k["username"], "display": k["display"]}
+                for k in self.db.q("SELECT username, display FROM kids WHERE role!='master' AND disabled=0 "
+                                   "ORDER BY display")]
+        return {"kids": kids, "require_password": self.passwords_required()}
 
     def request_status(self, rid: int) -> dict:
         rows = self.db.q("SELECT * FROM requests WHERE id=?", (rid,))
@@ -586,6 +609,12 @@ class HomeGuard:
             self.reply(chat, self.sites_text())
         elif cmd == "/sites":
             self.reply(chat, self.sites_text())
+        elif cmd == "/passwords":
+            if arg in ("on", "off"):
+                self.db.set_setting("require_password", "1" if arg == "on" else "0")
+            self.reply(chat, "🔑 כניסה עם סיסמה: פעילה" if self.passwords_required() else
+                       "👆 כניסה בלי סיסמה: הילד בוחר את השם שלו ואתם מאשרים. (מאסטר תמיד עם סיסמה)\n"
+                       "לשינוי: /passwords on או /passwords off")
         elif cmd == "/kids":
             self.reply(chat, self.kids_text())
         elif cmd in ("/addkid", "/addmaster"):
@@ -660,6 +689,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 /sites – הרשימות
 
 👧 חשבונות:
+/passwords on|off – כניסה עם סיסמה או רק בחירת שם (ברירת מחדל: בלי סיסמה)
 /kids – כל החשבונות והסיסמאות
 /addkid <משתמש> [שם] – ילד חדש עם סיסמה זמנית (בוחר/ת סיסמה אישית בכניסה הראשונה)
 /addmaster <משתמש> [שם] – חשבון מאסטר: בלי אישור, בלי סינון, בלי הגבלת זמן
@@ -703,6 +733,8 @@ def make_handler(hg: HomeGuard):
             qs = {k: v[0] for k, v in parse_qs(u.query).items()}
             if u.path == "/api/state":
                 self._send(200, hg.state(qs.get("pc", ""), qs.get("user", "")))
+            elif u.path == "/api/kids":
+                self._send(200, hg.kids_for_lock_screen())
             elif u.path == "/api/request":
                 self._send(200, hg.request_status(int(qs.get("id", "0"))))
             else:

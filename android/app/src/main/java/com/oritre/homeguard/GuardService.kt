@@ -52,6 +52,7 @@ class GuardService : Service() {
     private var warned = mutableSetOf<Int>()
     private var lastSessionId = -1
     @Volatile var hiddenUntil = 0L // emergency call
+    @Volatile private var kidsFetchedAt = -1_000_000L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -102,6 +103,18 @@ class GuardService : Service() {
         if (!prefs.configured) {
             main.post { overlay?.hide() }
             return
+        }
+        if (SystemClock.elapsedRealtime() - kidsFetchedAt > 30_000) {
+            api.kids()?.let { k ->
+                kidsFetchedAt = SystemClock.elapsedRealtime()
+                val arr = k.optJSONArray("kids")
+                val list = if (arr == null) emptyList() else (0 until arr.length()).map {
+                    val o = arr.getJSONObject(it)
+                    o.optString("username") to o.optString("display")
+                }
+                val passwordless = !k.optBoolean("require_password", true)
+                main.post { overlay?.setKids(list, passwordless) }
+            }
         }
         val st = api.state()
         if (st != null && !st.has("error")) {

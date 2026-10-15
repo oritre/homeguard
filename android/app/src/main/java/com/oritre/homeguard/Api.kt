@@ -47,6 +47,7 @@ class Api(private val prefs: Prefs) {
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
     fun state(): JSONObject? = call("GET", "/api/state?pc=${enc(prefs.deviceName)}&user=android", null)
+    fun kids(): JSONObject? = call("GET", "/api/kids", null)
     fun requestStatus(id: Int): JSONObject? = call("GET", "/api/request?id=$id", null)
 
     private fun post(path: String, vararg kv: Pair<String, Any>): JSONObject? {

@@ -24,7 +24,9 @@ class LockOverlay(private val svc: GuardService) {
     private val box = LinearLayout(svc)
     private var shown = false
 
-    private enum class Screen { LOGIN, WAITING, NEW_PASSWORD, CHANGE_PASSWORD, PROTECTION_OFF }
+    private enum class Screen { LOGIN, MASTER, WAITING, NEW_PASSWORD, CHANGE_PASSWORD, PROTECTION_OFF }
+    private var kids: List<Pair<String, String>> = emptyList()
+    private var passwordless = false
     private var screen = Screen.LOGIN
     private var requestId = 0
     private var user = ""
@@ -74,6 +76,13 @@ class LockOverlay(private val svc: GuardService) {
         try { wm.removeView(root) } catch (_: Exception) {}
         shown = false
         if (screen == Screen.WAITING) go(Screen.LOGIN)
+    }
+
+    fun setKids(list: List<Pair<String, String>>, noPasswords: Boolean) {
+        if (list == kids && noPasswords == passwordless) return
+        kids = list
+        passwordless = noPasswords
+        if (screen == Screen.LOGIN) render()
     }
 
     fun update(session: JSONObject?, extendPending: Boolean, online: Boolean) {
@@ -131,7 +140,8 @@ class LockOverlay(private val svc: GuardService) {
     private fun render() {
         box.removeAllViews()
         when (screen) {
-            Screen.LOGIN -> renderLogin()
+            Screen.LOGIN -> if (passwordless && kids.isNotEmpty()) renderPickName() else renderLogin()
+            Screen.MASTER -> renderLogin()
             Screen.WAITING -> renderWaiting()
             Screen.NEW_PASSWORD -> renderNewPassword()
             Screen.CHANGE_PASSWORD -> renderChangePassword()
@@ -143,9 +153,30 @@ class LockOverlay(private val svc: GuardService) {
         }
     }
 
-    private fun renderLogin() {
+    private fun renderPickName() {
         add(text("🛡️ המכשיר נעול", 30f, bold = true))
-        add(text("הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם", 15f, muted))
+        add(text("מי נכנס? לחצו על השם שלכם, ואבא או אמא יאשרו בטלגרם", 15f, muted))
+        var first = true
+        for ((username, display) in kids) {
+            add(button(display) {
+                user = display
+                message = "שולחים..."
+                render()
+                svc.background {
+                    val r = svc.api.login(username, "")
+                    main.post { onLogin(r, "") }
+                }
+            }, if (first) 32 else 12)
+            first = false
+        }
+        add(button("כניסת מאסטר", false) { go(Screen.MASTER) }, 32)
+    }
+
+    private fun renderLogin() {
+        val master = screen == Screen.MASTER
+        add(text(if (master) "כניסת מאסטר" else "🛡️ המכשיר נעול", 30f, bold = true))
+        add(text(if (master) "שם משתמש וסיסמה של חשבון המאסטר"
+                 else "הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם", 15f, muted))
         val u = field("שם משתמש", false).also { it.setText(user) }
         val p = field("סיסמה", true)
         add(u, 32); add(p)
@@ -163,7 +194,8 @@ class LockOverlay(private val svc: GuardService) {
                 main.post { onLogin(r, pass) }
             }
         }, 24)
-        add(button("שינוי סיסמה", false) { go(Screen.CHANGE_PASSWORD) })
+        if (master) add(button("חזרה", false) { go(Screen.LOGIN) })
+        else add(button("שינוי סיסמה", false) { go(Screen.CHANGE_PASSWORD) })
     }
 
     private fun onLogin(r: JSONObject?, pass: String) {

@@ -205,6 +205,9 @@ def make_local_handler(agent: Agent):
             qs = {k: v[0] for k, v in parse_qs(u.query).items()}
             if u.path == "/state":
                 self._send(agent.local_state())
+            elif u.path == "/kids":
+                agent.last_heartbeat = time.time()
+                self._send(agent.server("GET", "/api/kids") or {"kids": [], "require_password": True})
             elif u.path == "/request":
                 agent.last_heartbeat = time.time()
                 res = agent.server("GET", "/api/request", params={"id": qs.get("id", "0")})

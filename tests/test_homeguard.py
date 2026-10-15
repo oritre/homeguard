@@ -58,6 +58,7 @@ class ServerTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], agent_token="t", db=os.path.join(self.tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("require_password", "1")  # these tests cover the password flow
         self.db.add_kid("Noam", "1234", "נועם")
         self.tg = FakeTelegram()
         self.hg = hs.HomeGuard(cfg, self.db, self.tg)
@@ -228,6 +229,47 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(db.kid("a")["role"], "kid")
 
 
+class PasswordlessTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], agent_token="t", db=os.path.join(tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.db.add_kid("evyatar", "1111", "אביתר", must_set=True)
+        self.db.add_kid("hagit", "secret", "חגית", role="master")
+        self.tg = FakeTelegram()
+        self.hg = hs.HomeGuard(cfg, self.db, self.tg)
+
+    def test_default_is_passwordless(self):
+        self.assertFalse(self.hg.passwords_required())
+        lst = self.hg.kids_for_lock_screen()
+        self.assertEqual([k["username"] for k in lst["kids"]], ["evyatar"])  # master not listed
+        self.assertFalse(lst["require_password"])
+
+    def test_kid_logs_in_with_name_only_and_parent_approves(self):
+        res = self.hg.login("salon", "evyatar", "")
+        self.assertTrue(res["ok"])
+        self.assertNotIn("need_new_password", res)
+        self.assertEqual([m["chat_id"] for m in self.tg.sent()], [1, 2])
+        self.hg.decide(f"ap:{res['request_id']}:full:30", "אורי")
+        self.assertEqual(self.hg.state("salon")["session"]["kid"], "evyatar")
+
+    def test_master_still_needs_password(self):
+        self.assertFalse(self.hg.login("salon", "hagit", "")["ok"])
+        self.assertTrue(self.hg.login("salon", "hagit", "secret")["approved"])
+
+    def test_disabled_kid_hidden_and_refused(self):
+        self.db.x("UPDATE kids SET disabled=1 WHERE username='evyatar'")
+        self.assertEqual(self.hg.kids_for_lock_screen()["kids"], [])
+        self.assertFalse(self.hg.login("salon", "evyatar", "")["ok"])
+
+    def test_bot_toggle(self):
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "/passwords on"}})
+        self.assertTrue(self.hg.passwords_required())
+        self.assertFalse(self.hg.login("salon", "evyatar", "")["ok"])
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "/passwords off"}})
+        self.assertFalse(self.hg.passwords_required())
+
+
 class DnsTest(unittest.TestCase):
     def test_policy(self):
         allow, block = ["wikipedia.org", "youtube.com"], ["tiktok.com"]
@@ -296,6 +338,7 @@ class AgentEndToEnd(unittest.TestCase):
         sport = free_port()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="secret", db=os.path.join(tmp, "db"))
         db = hs.DB(cfg["db"])
+        db.set_setting("require_password", "1")
         db.add_kid("noam", "1234", "נועם")
         db.add_site("wikipedia.org", "allow")
         self.hg = hs.HomeGuard(cfg, db, FakeTelegram())

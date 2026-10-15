@@ -7,6 +7,7 @@ again when the time is up. Talks only to the local agent on 127.0.0.1.
 from __future__ import annotations
 
 import json
+import time
 import sys
 import tkinter as tk
 import urllib.request
@@ -76,6 +77,15 @@ class LockScreen:
         self.subtitle = tk.Label(self.frame, text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם",
                                  font=(FONT, 14), fg="#aab3c5", bg=BG)
         self.subtitle.pack(pady=(0, 24))
+
+        # Passwordless mode: one big button per kid; parents approve in Telegram.
+        self.kids_frame = tk.Frame(self.frame, bg=BG)
+        self.kid_names: list = []
+        self.passwordless = False
+        self.master_link = tk.Button(self.frame, text="כניסת מאסטר", font=(FONT, 11, "underline"), bg=BG,
+                                     fg="#aab3c5", activebackground=BG, relief="flat", bd=0, cursor="hand2",
+                                     command=self.show_master_form)
+        self.last_kids_refresh = 0.0
 
         self.form = tk.Frame(self.frame, bg=BG)
         self.form.pack()
@@ -165,6 +175,23 @@ class LockScreen:
         y = self.timer.winfo_y() + e.y - self._drag[1]
         self.timer.geometry(f"+{x}+{y}")
 
+    def refresh_kids(self) -> None:
+        self.last_kids_refresh = time.time()
+        res = call("GET", "/kids")
+        if not res:
+            return
+        self.passwordless = not res.get("require_password", True)
+        kids = [(k["username"], k["display"]) for k in res.get("kids", [])]
+        if kids != self.kid_names:
+            self.kid_names = kids
+            for w in self.kids_frame.winfo_children():
+                w.destroy()
+            for i, (username, display) in enumerate(kids):
+                tk.Button(self.kids_frame, text=display, font=(FONT, 18, "bold"), bg=ACCENT, fg="white",
+                          activebackground=ACCENT, relief="flat", width=12,
+                          command=lambda u=username: self.request_login(u, "")).grid(
+                    row=i // 3, column=2 - i % 3, padx=8, pady=8, ipady=10)
+
     def show_locked(self, note: str = ""):
         self.state = "locked"
         self.request_id = None
@@ -172,15 +199,32 @@ class LockScreen:
         if self.site_dialog:
             self.site_dialog.destroy()
             self.site_dialog = None
+        self.refresh_kids()
         self.title.config(text="🛡️ המחשב נעול")
-        self.subtitle.config(text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם")
         self.cancel_btn.pack_forget()
         self.pw_form.pack_forget()
-        self.form.pack(before=self.message)
+        self.form.pack_forget()
+        self.kids_frame.pack_forget()
+        self.master_link.pack_forget()
+        if self.passwordless and self.kid_names:
+            self.subtitle.config(text="מי נכנס? לחצו על השם שלכם, ואבא או אמא יאשרו בטלגרם")
+            self.kids_frame.pack(before=self.message)
+            self.master_link.pack(before=self.message, pady=(14, 0))
+        else:
+            self.subtitle.config(text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם")
+            self.form.pack(before=self.message)
+            self.user_entry.focus_set()
         self.login_btn.config(state="normal")
         self.pass_var.set("")
         self.message.config(text=note)
         self.root.deiconify()
+
+    def show_master_form(self):
+        self.kids_frame.pack_forget()
+        self.master_link.pack_forget()
+        self.title.config(text="כניסת מאסטר")
+        self.subtitle.config(text="שם משתמש וסיסמה של חשבון המאסטר")
+        self.form.pack(before=self.message)
         self.user_entry.focus_set()
 
     def show_set_password(self, user: str = "", old: str = "", display: str = ""):
@@ -223,6 +267,8 @@ class LockScreen:
     def show_waiting(self, display: str):
         self.state = "waiting"
         self.form.pack_forget()
+        self.kids_frame.pack_forget()
+        self.master_link.pack_forget()
         self.title.config(text=f"שלום {display} 👋")
         self.subtitle.config(text="שלחנו בקשה לאבא ואמא בטלגרם. מחכים לאישור...")
         self.message.config(text="")
@@ -243,6 +289,9 @@ class LockScreen:
         if not user or not pw:
             self.message.config(text="צריך שם משתמש וסיסמה")
             return
+        self.request_login(user, pw)
+
+    def request_login(self, user: str, pw: str):
         self.login_btn.config(state="disabled")
         res = call("POST", "/login", {"username": user, "password": pw})
         self.login_btn.config(state="normal")
@@ -336,6 +385,9 @@ class LockScreen:
                     self.show_locked()
             if session and self.state == "unlocked":
                 self.update_timer(session, st.get("extend_pending"))
+            elif (self.state == "locked" and not self.user_var.get()
+                  and time.time() - self.last_kids_refresh > 60):
+                self.show_locked(self.message.cget("text"))  # pick up new kids / password setting
         self.root.after(2000, self.poll)
 
     def update_timer(self, session: dict, extend_pending: bool):
