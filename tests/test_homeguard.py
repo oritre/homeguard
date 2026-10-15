@@ -270,6 +270,47 @@ class PasswordlessTest(unittest.TestCase):
         self.assertFalse(self.hg.passwords_required())
 
 
+class CustomTimeTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.db.add_kid("reei", "1111", "רעי")
+        self.hg = hs.HomeGuard(cfg, self.db, FakeTelegram())
+
+    def test_parse(self):
+        from datetime import datetime
+        now = datetime(2026, 10, 15, 17, 0).timestamp()
+        self.assertEqual(hs.parse_duration("45", now), 45)
+        self.assertEqual(hs.parse_duration("2 שעות", now), 120)
+        self.assertEqual(hs.parse_duration("1.5ש", now), 90)
+        self.assertEqual(hs.parse_duration("עד 18:30", now), 90)
+        self.assertEqual(hs.parse_duration("16:00", now), 23 * 60)
+        self.assertEqual(hs.parse_duration("מחר", now), 0)
+
+    def cb(self, data):
+        self.hg.handle_update({"callback_query": {"id": "c", "from": {"id": 1, "first_name": "אורי"},
+                                                  "message": {"chat": {"id": 1}}, "data": data}})
+
+    def test_custom_login_time(self):
+        rid = self.hg.login("salon", "reei", "")["request_id"]
+        self.cb(f"cu:{rid}:allowlist")
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "abc"}})  # not understood, still waiting
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "45"}})
+        s = self.hg.state("salon")["session"]
+        self.assertEqual(s["mode"], "allowlist")
+        self.assertTrue(44 * 60 < s["remaining"] <= 45 * 60)
+
+    def test_custom_extension(self):
+        rid = self.hg.login("salon", "reei", "")["request_id"]
+        self.hg.decide(f"ap:{rid}:full:30", "אורי")
+        self.hg.request_extension("salon")
+        ext = self.db.q("SELECT id FROM requests WHERE kind='extend'")[0]["id"]
+        self.cb(f"cx:{ext}")
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "2 שעות"}})
+        self.assertGreater(self.hg.state("salon")["session"]["remaining"], 149 * 60)
+
+
 class DnsTest(unittest.TestCase):
     def test_policy(self):
         allow, block = ["wikipedia.org", "youtube.com"], ["tiktok.com"]

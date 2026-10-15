@@ -23,6 +23,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -30,7 +31,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -77,6 +78,29 @@ def fmt_min(minutes: int) -> str:
 
 def hhmm(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def parse_duration(text: str, now: float | None = None) -> int:
+    """Minutes from what a parent typed: '45', '90 דק', '2 שעות', '1.5ש', '18:30' / 'עד 18:30'. 0 = not understood."""
+    t = text.strip().replace("עד", "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", t)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if h > 23 or mi > 59:
+            return 0
+        now = now or time.time()
+        dt = datetime.fromtimestamp(now)
+        target = dt.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if target.timestamp() <= now:
+            target += timedelta(days=1)
+        return max(1, int((target.timestamp() - now + 59) // 60))
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(ש|שע|שעה|שעות|h)?\s*'?\s*(דק|דקות|m)?'?", t)
+    if not m:
+        return 0
+    value = float(m.group(1))
+    minutes = value * 60 if m.group(2) else value
+    minutes = int(round(minutes))
+    return minutes if 1 <= minutes <= 7 * 24 * 60 else 0
 
 
 def normalize_domain(d: str) -> str:
@@ -269,6 +293,7 @@ class HomeGuard:
         self.db = db
         self.tg = tg
         self.parents = [int(c) for c in cfg["parent_chat_ids"]]
+        self.awaiting_time: dict[int, str] = {}
 
     # ---- messaging helpers
     def notify(self, text: str, keyboard=None) -> list[list[int]]:
@@ -339,6 +364,8 @@ class HomeGuard:
             options = list(self.cfg["durations"]) + ([0] if mode != "offline" else [])
             kb.append([{"text": f"{MODE_SHORT[mode]} {fmt_min(m) if m else '♾️'}",
                         "callback_data": f"ap:{rid}:{mode}:{m}"} for m in options])
+        kb.append([{"text": f"⏱ זמן אחר {MODE_SHORT[mode]}", "callback_data": f"cu:{rid}:{mode}"}
+                   for mode in ("full", "allowlist", "offline")])
         kb.append([{"text": "❌ לא עכשיו", "callback_data": f"dn:{rid}"}])
         text = (f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})\n"
                 f"{MODE_SHORT['full']} אינטרנט מלא · {MODE_SHORT['allowlist']} אתרים מאושרים · "
@@ -432,7 +459,7 @@ class HomeGuard:
                         (pc, s["kid"], time.time(), s["id"]))
         left = max(0, int((s["ends"] - time.time()) // 60))
         kb = [[{"text": f"+{fmt_min(m)}", "callback_data": f"ex:{rid}:{m}"} for m in self.cfg["extend_options"]],
-              [{"text": "❌ לא", "callback_data": f"dn:{rid}"}]]
+              [{"text": "⏱ זמן אחר", "callback_data": f"cx:{rid}"}, {"text": "❌ לא", "callback_data": f"dn:{rid}"}]]
         msgs = self.notify(f"⏳ {self.db.kid_display(s['kid'])} מבקש/ת עוד זמן במחשב '{pc}' (נשארו {left} דק')", kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True}
@@ -547,7 +574,9 @@ class HomeGuard:
                 return
             who = cq["from"].get("first_name", "הורה")
             data = cq.get("data", "")
-            if data.startswith("lk:"):
+            if data.startswith(("cu:", "cx:")):
+                answer = self.ask_custom_time(chat, data)
+            elif data.startswith("lk:"):
                 pc = data[3:]
                 answer = "ננעל" if self.lock(pc) else "כבר נעול"
             else:
@@ -568,7 +597,36 @@ class HomeGuard:
                 self.reply(chat, f"שלום! מזהה הצ'אט שלך: {chat}\n"
                                  "כדי לקבל בקשות, הוסיפו אותו ל-parent_chat_ids בקובץ config.json של השרת והפעילו מחדש.")
             return
+        if chat in self.awaiting_time and not text.startswith("/"):
+            self.answer_custom_time(chat, text)
+            return
+        self.awaiting_time.pop(chat, None)
         self.handle_command(chat, cmd, arg)
+
+    # ---- custom duration: parent taps "other time" and types it
+    def ask_custom_time(self, chat: int, data: str) -> str:
+        rid = int(data.split(":")[1])
+        rows = self.db.q("SELECT status FROM requests WHERE id=?", (rid,))
+        if not rows or rows[0]["status"] != "pending":
+            return "כבר טופל"
+        self.awaiting_time[chat] = data
+        if self.tg:
+            self.tg.call("sendMessage", chat_id=chat, reply_markup={"force_reply": True},
+                         text="⏱ כמה זמן? כתבו מספר דקות (45), שעות (2 שעות / 1.5ש) או עד איזו שעה (18:30)")
+        return "כתבו את הזמן"
+
+    def answer_custom_time(self, chat: int, text: str) -> None:
+        minutes = parse_duration(text)
+        if not minutes:
+            self.reply(chat, "לא הבנתי 🙂 למשל: 45, 2 שעות, 1.5ש או 18:30")
+            return
+        data = self.awaiting_time.pop(chat)
+        parts = data.split(":")
+        if parts[0] == "cu":
+            result = self.decide(f"ap:{parts[1]}:{parts[2]}:{minutes}", "הורה")
+        else:
+            result = self.decide(f"ex:{parts[1]}:{minutes}", "הורה")
+        self.reply(chat, f"{result} ({fmt_min(minutes)})")
 
     def handle_command(self, chat: int, cmd: str, arg: str) -> None:
         if cmd in ("/start", "/help"):
@@ -690,6 +748,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 
 👧 חשבונות:
 /passwords on|off – כניסה עם סיסמה או רק בחירת שם (ברירת מחדל: בלי סיסמה)
+⏱ בכל בקשה יש "זמן אחר": כותבים 45, 2 שעות או 18:30
 /kids – כל החשבונות והסיסמאות
 /addkid <משתמש> [שם] – ילד חדש עם סיסמה זמנית (בוחר/ת סיסמה אישית בכניסה הראשונה)
 /addmaster <משתמש> [שם] – חשבון מאסטר: בלי אישור, בלי סינון, בלי הגבלת זמן
