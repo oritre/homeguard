@@ -59,7 +59,7 @@ class FilterVpn : VpnService() {
             .setSession("HomeGuard")
             .addAddress(TUN_ADDR, 32)
             .addDnsServer(DNS_ADDR)
-            .setBlocking(true)
+        if (android.os.Build.VERSION.SDK_INT >= 29) b.setBlocking(true)
         try {
             b.addDisallowedApplication(packageName) // our own app always reaches the server
         } catch (e: Exception) { Log.w(TAG, "disallow self", e) }
@@ -92,7 +92,8 @@ class FilterVpn : VpnService() {
             while (tun === fd) {
                 val n = try { input.read(buf) } catch (e: Exception) { -1 }
                 if (n <= 0) {
-                    if (tun !== fd) break
+                    if (tun !== fd || n < 0) break
+                    try { Thread.sleep(20) } catch (_: InterruptedException) { break }
                     continue
                 }
                 val packet = buf.copyOf(n)
