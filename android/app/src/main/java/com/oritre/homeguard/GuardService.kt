@@ -220,6 +220,8 @@ class GuardService : Service() {
 
     fun pollOnceAsync() = background { pollOnce() }
 
+    fun accessPending() = lastState?.optBoolean("access_pending") ?: false
+
     fun toast(text: String) = main.post { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
 
     // ------------------------------------------------------------ notification
@@ -234,6 +236,11 @@ class GuardService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
         if (s != null) {
+            val open = PendingIntent.getActivity(this, 4,
+                Intent(this, RequestActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            b.setContentIntent(open)
+            b.setContentText(if (accessPending()) "⏳ הבקשה החדשה מחכה לאבא/אמא" else "לחצו כאן לבקשה חדשה או להתנתקות")
             if (!s.optBoolean("unlimited")) {
                 b.setUsesChronometer(true)
                 b.setChronometerCountDown(true)
@@ -243,7 +250,7 @@ class GuardService : Service() {
             val input = RemoteInput.Builder(ActionReceiver.KEY_SITE).setLabel("כתובת האתר, למשל youtube.com").build()
             b.addAction(Notification.Action.Builder(null, "בקשת אתר", pending(ActionReceiver.SITE, 2))
                 .addRemoteInput(input).build())
-            b.addAction(Notification.Action.Builder(null, "סיימתי", pending(ActionReceiver.DONE, 3)).build())
+            b.addAction(Notification.Action.Builder(null, "התנתקות", pending(ActionReceiver.DONE, 3)).build())
         }
         return b.build()
     }

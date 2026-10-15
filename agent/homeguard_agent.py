@@ -228,7 +228,8 @@ def make_local_handler(agent: Agent):
             path = urlparse(self.path).path
             if path == "/login":
                 res = agent.server("POST", "/api/login", {"pc": pc, "username": body.get("username", ""),
-                                                          "password": body.get("password", "")})
+                                                          "password": body.get("password", ""),
+                                                          "note": body.get("note", "")})
                 if res and res.get("approved"):
                     agent.poll_once()  # master account: open right away
                 self._send(res or {"ok": False, "error": "אין חיבור לשרת. בקשו מאבא/אמא לבדוק."})
@@ -238,6 +239,9 @@ def make_local_handler(agent: Agent):
                 self._send(res or {"ok": False, "error": "אין חיבור לשרת"})
             elif path == "/site":
                 self._send(agent.server("POST", "/api/site", {"pc": pc, "domain": body.get("domain", "")})
+                           or {"ok": False, "error": "אין חיבור לשרת"})
+            elif path == "/rerequest":
+                self._send(agent.server("POST", "/api/rerequest", {"pc": pc, "note": body.get("note", "")})
                            or {"ok": False, "error": "אין חיבור לשרת"})
             elif path == "/cancel":
                 agent.server("POST", "/api/cancel", {"pc": pc, "request_id": body.get("request_id", 0)})

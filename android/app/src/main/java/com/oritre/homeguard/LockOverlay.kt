@@ -24,12 +24,13 @@ class LockOverlay(private val svc: GuardService) {
     private val box = LinearLayout(svc)
     private var shown = false
 
-    private enum class Screen { LOGIN, MASTER, WAITING, NEW_PASSWORD, CHANGE_PASSWORD, PROTECTION_OFF }
+    private enum class Screen { LOGIN, NOTE, MASTER, WAITING, NEW_PASSWORD, CHANGE_PASSWORD, PROTECTION_OFF }
     private var kids: List<Pair<String, String>> = emptyList()
     private var passwordless = false
     private var screen = Screen.LOGIN
     private var requestId = 0
     private var user = ""
+    private var pickedUsername = ""
     private var tempPassword = ""
     private var message = ""
     private var pollWaiting: Runnable? = null
@@ -141,6 +142,7 @@ class LockOverlay(private val svc: GuardService) {
         box.removeAllViews()
         when (screen) {
             Screen.LOGIN -> if (passwordless && kids.isNotEmpty()) renderPickName() else renderLogin()
+            Screen.NOTE -> renderNote()
             Screen.MASTER -> renderLogin()
             Screen.WAITING -> renderWaiting()
             Screen.NEW_PASSWORD -> renderNewPassword()
@@ -160,16 +162,38 @@ class LockOverlay(private val svc: GuardService) {
         for ((username, display) in kids) {
             add(button(display) {
                 user = display
-                message = "שולחים..."
-                render()
-                svc.background {
-                    val r = svc.api.login(username, "")
-                    main.post { onLogin(r, "") }
-                }
+                pickedUsername = username
+                go(Screen.NOTE)
             }, if (first) 32 else 12)
             first = false
         }
         add(button("כניסת מאסטר", false) { go(Screen.MASTER) }, 32)
+    }
+
+    private fun noteField(): EditText = field("מה תרצו לעשות? (לא חובה)", false).apply {
+        textSize = 16f
+        setSingleLine(false)
+        minLines = 2
+        maxLines = 4
+        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+    }
+
+    private fun renderNote() {
+        add(text("שלום $user 👋", 28f, bold = true))
+        add(text("כתבו לאבא ואמא מה אתם רוצים לעשות, למשל: שיעורי בית, יוטיוב, משחק", 15f, muted))
+        val note = noteField()
+        add(note, 32)
+        add(button("שליחת בקשה") {
+            val n = note.text.toString().trim()
+            val name = pickedUsername
+            message = "שולחים..."
+            render()
+            svc.background {
+                val r = svc.api.login(name, "", n)
+                main.post { onLogin(r, "") }
+            }
+        }, 24)
+        add(button("חזרה", false) { go(Screen.LOGIN) })
     }
 
     private fun renderLogin() {
@@ -180,9 +204,11 @@ class LockOverlay(private val svc: GuardService) {
         val u = field("שם משתמש", false).also { it.setText(user) }
         val p = field("סיסמה", true)
         add(u, 32); add(p)
+        val note = if (master) null else noteField().also { add(it) }
         add(button("בקשו כניסה") {
             val name = u.text.toString().trim()
             val pass = p.text.toString()
+            val n = note?.text?.toString()?.trim() ?: ""
             if (name.isEmpty() || pass.isEmpty()) {
                 go(Screen.LOGIN, "צריך שם משתמש וסיסמה"); return@button
             }
@@ -190,7 +216,7 @@ class LockOverlay(private val svc: GuardService) {
             message = "שולחים..."
             render()
             svc.background {
-                val r = svc.api.login(name, pass)
+                val r = svc.api.login(name, pass, n)
                 main.post { onLogin(r, pass) }
             }
         }, 24)

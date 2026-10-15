@@ -78,6 +78,14 @@ class LockScreen:
                                  font=(FONT, 14), fg="#aab3c5", bg=BG)
         self.subtitle.pack(pady=(0, 24))
 
+        # Optional note to the parents ("what do you want to do?"), sent with the login request.
+        self.note_frame = tk.Frame(self.frame, bg=BG)
+        tk.Label(self.note_frame, text="מה תרצו לעשות? (לא חובה, אבא ואמא יראו את זה)", font=(FONT, 13),
+                 fg=FG, bg=BG).pack()
+        self.note_var = tk.StringVar()
+        tk.Entry(self.note_frame, textvariable=self.note_var, font=(FONT, 15), width=40, justify="center",
+                 relief="flat").pack(pady=(4, 16), ipady=6)
+
         # Passwordless mode: one big button per kid; parents approve in Telegram.
         self.kids_frame = tk.Frame(self.frame, bg=BG)
         self.kid_names: list = []
@@ -144,7 +152,9 @@ class LockScreen:
         self.site_btn = tk.Button(self.timer, text="בקשת אתר", font=(FONT, 10), relief="flat", bg="#39445a",
                                   fg=FG, command=self.ask_site)
         self.site_btn.pack(side="right", padx=2, pady=4)
-        tk.Button(self.timer, text="סיימתי", font=(FONT, 10), relief="flat", bg="#39445a", fg=FG,
+        tk.Button(self.timer, text="בקשה חדשה", font=(FONT, 10), relief="flat", bg="#39445a", fg=FG,
+                  command=self.ask_access).pack(side="right", padx=2, pady=4)
+        tk.Button(self.timer, text="התנתקות", font=(FONT, 10), relief="flat", bg="#39445a", fg=FG,
                   command=self.done).pack(side="right", padx=(6, 2), pady=4)
         self.site_dialog = None
         self.timer.withdraw()
@@ -206,6 +216,7 @@ class LockScreen:
         self.form.pack_forget()
         self.kids_frame.pack_forget()
         self.master_link.pack_forget()
+        self.note_frame.pack(before=self.message)
         if self.passwordless and self.kid_names:
             self.subtitle.config(text="מי נכנס? לחצו על השם שלכם, ואבא או אמא יאשרו בטלגרם")
             self.kids_frame.pack(before=self.message)
@@ -220,6 +231,7 @@ class LockScreen:
         self.root.deiconify()
 
     def show_master_form(self):
+        self.note_frame.pack_forget()
         self.kids_frame.pack_forget()
         self.master_link.pack_forget()
         self.title.config(text="כניסת מאסטר")
@@ -231,6 +243,7 @@ class LockScreen:
         """display set = first login with a temporary password: log in right after saving."""
         self.state = "password"
         self.login_after_pw = bool(display)
+        self.note_frame.pack_forget()
         self.form.pack_forget()
         self.title.config(text=f"שלום {display} 👋" if display else "שינוי סיסמה")
         self.subtitle.config(text="בחרו סיסמה אישית שרק אתם תדעו" if display else
@@ -266,6 +279,7 @@ class LockScreen:
 
     def show_waiting(self, display: str):
         self.state = "waiting"
+        self.note_frame.pack_forget()
         self.form.pack_forget()
         self.kids_frame.pack_forget()
         self.master_link.pack_forget()
@@ -293,7 +307,7 @@ class LockScreen:
 
     def request_login(self, user: str, pw: str):
         self.login_btn.config(state="disabled")
-        res = call("POST", "/login", {"username": user, "password": pw})
+        res = call("POST", "/login", {"username": user, "password": pw, "note": self.note_var.get().strip()})
         self.login_btn.config(state="normal")
         if not res:
             self.message.config(text="אין חיבור לשומר המחשב. נסו שוב עוד רגע.")
@@ -304,6 +318,7 @@ class LockScreen:
             self.pass_var.set("")
         else:
             self.request_id = res["request_id"]
+            self.note_var.set("")
             self.show_waiting(res.get("display", user))
 
     def cancel(self):
@@ -316,15 +331,22 @@ class LockScreen:
         self.timer_label.config(text="ביקשנו עוד זמן ⏳" if res and res.get("ok") else "אין חיבור")
 
     def ask_site(self):
+        self.ask_text("בקשת אתר", "איזה אתר? (למשל scratch.mit.edu)", "/site", "domain", "ביקשנו את האתר 🌐")
+
+    def ask_access(self):
+        self.ask_text("בקשה חדשה", "מה תרצו לבקש? (למשל: אינטרנט מלא לשיעורי בית)", "/rerequest", "note",
+                      "הבקשה נשלחה ✅", allow_empty=True)
+
+    def ask_text(self, title: str, label: str, path: str, key: str, ok_text: str, allow_empty: bool = False):
+        """Small dialog over the desktop: one line of text sent to the parents."""
         if self.site_dialog:
-            self.site_dialog.lift()
-            return
+            self.site_dialog.destroy()
         d = self.site_dialog = tk.Toplevel(self.root)
-        d.title("בקשת אתר")
+        d.title(title)
         d.configure(bg=BG)
         d.attributes("-topmost", True)
         d.resizable(False, False)
-        tk.Label(d, text="איזה אתר? (למשל scratch.mit.edu)", font=(FONT, 12), fg=FG, bg=BG).pack(padx=16, pady=(12, 4))
+        tk.Label(d, text=label, font=(FONT, 12), fg=FG, bg=BG).pack(padx=16, pady=(12, 4))
         var = tk.StringVar()
         e = tk.Entry(d, textvariable=var, font=(FONT, 14), width=28, justify="center", relief="flat")
         e.pack(padx=16, pady=4, ipady=4)
@@ -336,11 +358,11 @@ class LockScreen:
             d.destroy()
 
         def send(_=None):
-            if not var.get().strip():
+            if not var.get().strip() and not allow_empty:
                 return
-            res = call("POST", "/site", {"domain": var.get().strip()})
+            res = call("POST", path, {key: var.get().strip()})
             if res and res.get("ok"):
-                self.timer_label.config(text="ביקשנו את האתר 🌐")
+                self.timer_label.config(text=ok_text)
                 close()
             else:
                 note.config(text=(res or {}).get("error", "אין חיבור"))

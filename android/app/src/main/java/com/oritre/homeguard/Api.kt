@@ -56,7 +56,9 @@ class Api(private val prefs: Prefs) {
         return call("POST", path, body)
     }
 
-    fun login(user: String, pass: String) = post("/api/login", "username" to user, "password" to pass)
+    fun login(user: String, pass: String, note: String = "") =
+        post("/api/login", "username" to user, "password" to pass, "note" to note)
+    fun rerequest(note: String) = post("/api/rerequest", "note" to note)
     fun cancel(id: Int) = post("/api/cancel", "request_id" to id)
     fun extend() = post("/api/extend")
     fun end() = post("/api/end")

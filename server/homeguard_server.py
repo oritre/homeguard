@@ -340,7 +340,7 @@ class HomeGuard:
         self.tg.call("sendMessage", **params)
 
     # ---- agent API
-    def login(self, pc: str, username: str, password: str) -> dict:
+    def login(self, pc: str, username: str, password: str, note: str = "") -> dict:
         now = time.time()
         recent = self.db.q("SELECT COUNT(*) c FROM failed_logins WHERE pc=? AND ts>?", (pc, now - 600))[0]["c"]
         if recent >= self.cfg["max_failed_logins"]:
@@ -368,11 +368,31 @@ class HomeGuard:
                             "VALUES ('login',?,?,?,'approved','master')", (pc, name, now))
             self.notify(f"🔓 {kid['display']} נכנס/ה למחשב '{pc}' עם חשבון מאסטר ({hhmm(now)})")
             return {"ok": True, "request_id": rid, "display": kid["display"], "approved": True}
-        # One pending login request per pc: cancel older ones.
+        rid = self._access_request(pc, name, f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})", note)
+        return {"ok": True, "request_id": rid, "display": kid["display"]}
+
+    def rerequest(self, pc: str, note: str = "") -> dict:
+        """A kid who is already in asks for different access (mode/time). The current session goes on
+        until a parent answers, and a "no" leaves it as it is."""
+        s = self.db.active_session(pc)
+        if not s or s["ends"] <= time.time():
+            return {"ok": False, "error": "אין זמן פעיל"}
+        k = self.db.kid(s["kid"])
+        if k and k["role"] == "master":
+            return {"ok": False, "error": "חשבון מאסטר לא צריך אישור"}
+        left = "ללא הגבלת זמן" if s["ends"] >= FOREVER else f"נשארו {int((s['ends'] - time.time()) // 60)} דק'"
+        head = (f"🔁 {self.db.kid_display(s['kid'])} מבקש/ת הרשאה חדשה במחשב '{pc}' ({hhmm(time.time())})\n"
+                f"עכשיו: {MODES[s['mode']]} · {left}")
+        return {"ok": True, "request_id": self._access_request(pc, s["kid"], head, note, s["id"])}
+
+    def _access_request(self, pc: str, kid: str, head: str, note: str, session_id=None) -> int:
+        """Ask the parents for access (mode x duration buttons). One pending login request per pc."""
         for old in self.db.q("SELECT * FROM requests WHERE pc=? AND kind='login' AND status='pending'", (pc,)):
             self.db.x("UPDATE requests SET status='cancelled' WHERE id=?", (old["id"],))
             self.edit_all(json.loads(old["messages"]), f"↩️ בקשה בוטלה ({self.db.kid_display(old['kid'])}, {pc})")
-        rid = self.db.x("INSERT INTO requests (kind, pc, kid, created) VALUES ('login',?,?,?)", (pc, name, now))
+        note = " ".join(str(note).split())[:300]
+        rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, session_id, detail) VALUES ('login',?,?,?,?,?)",
+                        (pc, kid, time.time(), session_id, note or None))
         kb = []
         modes = self.login_modes()
         for mode in modes:
@@ -382,11 +402,11 @@ class HomeGuard:
         kb.append([{"text": f"⏱ זמן אחר {MODE_SHORT[mode]}", "callback_data": f"cu:{rid}:{mode}"}
                    for mode in modes])
         kb.append([{"text": "❌ לא עכשיו", "callback_data": f"dn:{rid}"}])
-        text = (f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})\n" +
+        text = (head + (f"\n💬 {note}" if note else "") + "\n" +
                 " · ".join(f"{MODE_SHORT[m]} {MODE_NAMES[m]}" for m in modes) + " · ♾️ ללא הגבלת זמן")
         msgs = self.notify(text, kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
-        return {"ok": True, "request_id": rid, "display": kid["display"]}
+        return rid
 
     def full_internet_allowed(self) -> bool:
         return self.db.setting("full_internet", "0") == "1"
@@ -465,9 +485,11 @@ class HomeGuard:
                        "mode": s["mode"], "remaining": int(s["ends"] - now), "unlimited": s["ends"] >= FOREVER}
         pending_ext = bool(s and self.db.q(
             "SELECT 1 FROM requests WHERE kind='extend' AND session_id=? AND status='pending'", (s["id"],)))
+        access_pending = bool(s and self.db.q(
+            "SELECT 1 FROM requests WHERE kind='login' AND session_id=? AND status='pending'", (s["id"],)))
         allow = self.db.site_rows("allow")
         temp_allowed = {r["domain"] for r in allow if r["expires"] is not None}
-        return {"session": session, "extend_pending": pending_ext,
+        return {"session": session, "extend_pending": pending_ext, "access_pending": access_pending,
                 "allowlist": [r["domain"] for r in allow],
                 "blocklist": [d for d in self.db.sites("block") if d not in temp_allowed],
                 "server_time": now}
@@ -868,7 +890,10 @@ def make_handler(hg: HomeGuard):
             path = urlparse(self.path).path
             pc = str(body.get("pc", ""))
             if path == "/api/login":
-                self._send(200, hg.login(pc, str(body.get("username", "")), str(body.get("password", ""))))
+                self._send(200, hg.login(pc, str(body.get("username", "")), str(body.get("password", "")),
+                                         str(body.get("note", ""))))
+            elif path == "/api/rerequest":
+                self._send(200, hg.rerequest(pc, str(body.get("note", ""))))
             elif path == "/api/cancel":
                 hg.cancel_request(int(body.get("request_id", 0)))
                 self._send(200, {"ok": True})

@@ -99,6 +99,29 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.hg.request_status(rid)["status"], "denied")
         self.assertIsNone(self.hg.state("salon")["session"])
 
+    def test_login_note_reaches_parents(self):
+        self.hg.login("salon", "noam", "1234", "  רוצה לעשות\nשיעורי בית ביוטיוב ")
+        self.assertIn("💬 רוצה לעשות שיעורי בית ביוטיוב", self.tg.sent()[0]["text"])
+
+    def test_rerequest_keeps_session_until_answered(self):
+        self.assertFalse(self.hg.rerequest("salon", "x")["ok"])  # nobody is in
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        self.hg.decide(f"ap:{rid}:allowlist:30", "אורי")
+        res = self.hg.rerequest("salon", "צריך אינטרנט מלא לעבודה")
+        self.assertTrue(res["ok"])
+        st = self.hg.state("salon")
+        self.assertTrue(st["access_pending"])
+        self.assertEqual(st["session"]["mode"], "allowlist")  # still in while waiting
+        self.assertIn("הרשאה חדשה", self.tg.sent()[-1]["text"])
+        self.assertIn("צריך אינטרנט מלא לעבודה", self.tg.sent()[-1]["text"])
+        self.hg.decide(f"dn:{res['request_id']}", "אורי")  # "no" keeps the current session
+        self.assertEqual(self.hg.state("salon")["session"]["mode"], "allowlist")
+        res = self.hg.rerequest("salon")
+        self.hg.decide(f"ap:{res['request_id']}:offline:60", "אורי")
+        st = self.hg.state("salon")
+        self.assertEqual(st["session"]["mode"], "offline")
+        self.assertFalse(st["access_pending"])
+
     def test_extension_flow(self):
         rid = self.hg.login("salon", "noam", "1234")["request_id"]
         self.hg.decide(f"ap:{rid}:full:30", "אורי")
