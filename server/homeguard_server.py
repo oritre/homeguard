@@ -160,6 +160,10 @@ class DB:
                     key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS failed_logins (
                     pc TEXT NOT NULL, ts REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS messages (
+                    chat INTEGER NOT NULL, mid INTEGER NOT NULL, ts REAL NOT NULL,
+                    text TEXT NOT NULL, markup TEXT, deleted REAL,
+                    PRIMARY KEY (chat, mid));
                 """
             )
             for table, col, decl in (("kids", "pw_plain", "TEXT"),
@@ -285,15 +289,19 @@ class Telegram:
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}/"
 
-    def call(self, method: str, **params):
+    def call_raw(self, method: str, **params) -> dict:
+        """The whole Telegram reply, including the error description when it fails."""
         data = json.dumps(params).encode()
         req = urllib.request.Request(self.base + method, data=data,
                                      headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=params.get("timeout", 0) + 15) as r:
-                body = json.loads(r.read())
+                return json.loads(r.read())
         except urllib.error.HTTPError as e:
-            body = json.loads(e.read() or b"{}")
+            return json.loads(e.read() or b"{}")
+
+    def call(self, method: str, **params):
+        body = self.call_raw(method, **params)
         if not body.get("ok"):
             log.warning("telegram %s failed: %s", method, body)
             return None
@@ -317,28 +325,106 @@ class HomeGuard:
             log.info("NOTIFY: %s", text)
             return sent
         for chat in self.parents:
-            params = {"chat_id": chat, "text": text}
-            if keyboard:
-                params["reply_markup"] = {"inline_keyboard": keyboard}
-            res = self.tg.call("sendMessage", **params)
-            if res:
-                sent.append([chat, res["message_id"]])
+            mid = self.send(chat, text, {"inline_keyboard": keyboard} if keyboard else None)
+            if mid:
+                sent.append([chat, mid])
         return sent
+
+    def send(self, chat: int, text: str, markup=None) -> int | None:
+        """sendMessage, remembered in the message log when it goes to a parent."""
+        params = {"chat_id": chat, "text": text}
+        if markup:
+            params["reply_markup"] = markup
+        res = self.tg.call("sendMessage", **params)
+        if not res:
+            return None
+        if chat in self.parents:
+            inline = markup if markup and "inline_keyboard" in markup else None
+            self.db.x("INSERT OR REPLACE INTO messages (chat, mid, ts, text, markup) VALUES (?,?,?,?,?)",
+                      (chat, res["message_id"], time.time(), text, json.dumps(inline) if inline else None))
+        return res["message_id"]
 
     def edit_all(self, messages: list, text: str) -> None:
         if not self.tg:
             return
         for chat, mid in messages:
             self.tg.call("editMessageText", chat_id=chat, message_id=mid, text=text)
+            self.db.x("UPDATE messages SET text=?, markup=NULL WHERE chat=? AND mid=?", (text, chat, mid))
 
     def reply(self, chat: int, text: str, keyboard=None) -> None:
         if not self.tg:
             log.info("REPLY %s: %s", chat, text)
             return
-        params = {"chat_id": chat, "text": text}
-        if keyboard:
-            params["reply_markup"] = {"inline_keyboard": keyboard}
-        self.tg.call("sendMessage", **params)
+        self.send(chat, text, {"inline_keyboard": keyboard} if keyboard else None)
+
+    # ---- message log: /history and the check for deleted messages
+    def parent_name(self, chat: int) -> str:
+        return self.db.setting(f"name:{chat}", str(chat))
+
+    def history_text(self, count: int = 20) -> list[str]:
+        """The last events the bot reported, once per event (both parents get the same message)."""
+        rows = self.db.q("SELECT * FROM messages ORDER BY ts DESC LIMIT ?", (count * len(self.parents) * 3,))
+        events: dict = {}
+        for r in rows:
+            key = (int(r["ts"]) // 3, r["text"])
+            events.setdefault(key, []).append(r)
+        lines = []
+        for (_, text), copies in list(events.items())[:count]:
+            ts = min(c["ts"] for c in copies)
+            line = time.strftime("%d/%m %H:%M", time.localtime(ts)) + " · " + text.replace("\n", " ")[:220]
+            for c in copies:
+                if c["deleted"]:
+                    line += f"\n   🗑 נמחקה אצל {self.parent_name(c['chat'])} (התגלה {hhmm(c['deleted'])})"
+            lines.append(line)
+        if not lines:
+            return ["📜 אין עדיין היסטוריה"]
+        chunks, cur = [], f"📜 {len(lines)} האירועים האחרונים (מהחדש לישן):"
+        for line in lines:
+            if len(cur) + len(line) > 3800:
+                chunks.append(cur)
+                cur = ""
+            cur += "\n\n" + line
+        chunks.append(cur.strip())
+        return chunks
+
+    def message_exists(self, row) -> bool | None:
+        """Telegram can't say "was this deleted?", so set the message's buttons to what they already are:
+        a message that's still there answers "not modified", a deleted one "not found"."""
+        markup = json.loads(row["markup"]) if row["markup"] else {"inline_keyboard": []}
+        body = self.tg.call_raw("editMessageReplyMarkup", chat_id=row["chat"], message_id=row["mid"],
+                                reply_markup=markup)
+        desc = str(body.get("description", "")).lower()
+        if body.get("ok") or "not modified" in desc:
+            return True
+        if "not found" in desc or "message_id_invalid" in desc:
+            return False
+        log.warning("audit %s/%s: %s", row["chat"], row["mid"], desc)
+        return None  # unknown (network, rate limit): try again next time
+
+    def audit(self, days: int = 7) -> tuple[int, list]:
+        """Check the last week's messages are still in the parents' chats. Returns (checked, newly deleted)."""
+        if not self.tg:
+            return 0, []
+        rows = self.db.q("SELECT * FROM messages WHERE deleted IS NULL AND ts>? ORDER BY ts DESC LIMIT 400",
+                         (time.time() - days * 86400,))
+        checked, gone = 0, []
+        for r in rows:
+            exists = self.message_exists(r)
+            if exists is None:
+                continue
+            checked += 1
+            if not exists:
+                self.db.x("UPDATE messages SET deleted=? WHERE chat=? AND mid=?", (time.time(), r["chat"], r["mid"]))
+                gone.append(r)
+            time.sleep(0.05)
+        if gone:
+            lines = [f"⚠️ בדיקת התאמה: {len(gone)} הודעות של הבוט נמחקו מהצ'אט:"]
+            for r in sorted(gone, key=lambda r: r["ts"]):
+                lines.append(f"• אצל {self.parent_name(r['chat'])}, " +
+                             time.strftime("%d/%m %H:%M", time.localtime(r["ts"])) + ": " +
+                             r["text"].replace("\n", " ")[:200])
+            self.notify("\n".join(lines)[:3900])
+        return checked, gone
 
     # ---- agent API
     def login(self, pc: str, username: str, password: str, note: str = "") -> dict:
@@ -631,6 +717,7 @@ class HomeGuard:
             if chat not in self.parents:
                 return
             who = cq["from"].get("first_name", "הורה")
+            self.remember_name(chat, who)
             data = cq.get("data", "")
             if data.startswith(("cu:", "cx:", "cs:")):
                 answer = self.ask_custom_time(chat, data)
@@ -655,11 +742,16 @@ class HomeGuard:
                 self.reply(chat, f"שלום! מזהה הצ'אט שלך: {chat}\n"
                                  "כדי לקבל בקשות, הוסיפו אותו ל-parent_chat_ids בקובץ config.json של השרת והפעילו מחדש.")
             return
+        self.remember_name(chat, msg.get("from", {}).get("first_name", ""))
         if chat in self.awaiting_time and not text.startswith("/"):
             self.answer_custom_time(chat, text)
             return
         self.awaiting_time.pop(chat, None)
         self.handle_command(chat, cmd, arg)
+
+    def remember_name(self, chat: int, name: str) -> None:
+        if name and self.db.setting(f"name:{chat}") != name:
+            self.db.set_setting(f"name:{chat}", name)
 
     # ---- custom duration: parent taps "other time" and types it
     def ask_custom_time(self, chat: int, data: str) -> str:
@@ -669,8 +761,8 @@ class HomeGuard:
             return "כבר טופל"
         self.awaiting_time[chat] = data
         if self.tg:
-            self.tg.call("sendMessage", chat_id=chat, reply_markup={"force_reply": True},
-                         text="⏱ כמה זמן? כתבו מספר דקות (45), שעות (2 שעות / 1.5ש) או עד איזו שעה (18:30)")
+            self.send(chat, "⏱ כמה זמן? כתבו מספר דקות (45), שעות (2 שעות / 1.5ש) או עד איזו שעה (18:30)",
+                      {"force_reply": True})
         return "כתבו את הזמן"
 
     def answer_custom_time(self, chat: int, text: str) -> None:
@@ -738,6 +830,15 @@ class HomeGuard:
             self.reply(chat, self.sites_text())
         elif cmd == "/sites":
             self.reply(chat, self.sites_text())
+        elif cmd == "/history":
+            count = int(arg) if arg.isdigit() else 20
+            for chunk in self.history_text(max(1, min(count, 200))):
+                self.reply(chat, chunk)
+        elif cmd == "/audit":
+            self.reply(chat, "🔎 בודק את ההודעות מהשבוע האחרון...")
+            checked, gone = self.audit()
+            if not gone:
+                self.reply(chat, f"✅ בדיקת התאמה: כל {checked} ההודעות מהשבוע האחרון נמצאות בצ'אטים")
         elif cmd == "/fullnet":
             if arg in ("on", "off"):
                 self.db.set_setting("full_internet", "1" if arg == "on" else "0")
@@ -830,6 +931,10 @@ HELP = """🛡️ HomeGuard – פקודות:
 /always site.com – אתר שפתוח בכל מצב, גם כשהאינטרנט חסום (🚫)
 /unalways site.com – להסיר מהפתוחים תמיד
 /sites – הרשימות
+
+📜 היסטוריה:
+/history [מספר] – האירועים האחרונים, גם אם ההודעות נמחקו מהצ'אט
+/audit – בדיקת התאמה עכשיו: האם נמחקו הודעות של הבוט (נבדק גם אוטומטית כל חצי שעה)
 
 👧 חשבונות:
 /passwords on|off – כניסה עם סיסמה או רק בחירת שם (ברירת מחדל: בלי סיסמה)
@@ -938,6 +1043,8 @@ def run(cfg: dict) -> None:
         {"command": "kids", "description": "חשבונות וסיסמאות"},
         {"command": "addkid", "description": "הוספת ילד"},
         {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
+        {"command": "history", "description": "היסטוריית אירועים"},
+        {"command": "audit", "description": "בדיקה אם נמחקו הודעות"},
         {"command": "help", "description": "עזרה"},
     ])
 
@@ -954,6 +1061,17 @@ def run(cfg: dict) -> None:
             time.sleep(10)
 
     threading.Thread(target=ticker, daemon=True).start()
+
+    def auditor():
+        """Every half hour: are the bot's messages still in the parents' chats?"""
+        while True:
+            time.sleep(1800)
+            try:
+                hg.audit()
+            except Exception:
+                log.exception("audit failed")
+
+    threading.Thread(target=auditor, daemon=True).start()
 
     offset = 0
     log.info("Telegram bot polling")

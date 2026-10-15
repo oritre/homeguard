@@ -49,6 +49,16 @@ class FakeTelegram:
         self.next_id += 1
         return {"message_id": self.next_id}
 
+    deleted: set = set()
+
+    def call_raw(self, method, **params):
+        self.calls.append((method, params))
+        if method == "editMessageReplyMarkup":
+            if (params["chat_id"], params["message_id"]) in self.deleted:
+                return {"ok": False, "description": "Bad Request: message to edit not found"}
+            return {"ok": False, "description": "Bad Request: message is not modified"}
+        return {"ok": True, "result": True}
+
     def sent(self, method="sendMessage"):
         return [p for m, p in self.calls if m == method]
 
@@ -416,6 +426,52 @@ class CustomTimeTest(unittest.TestCase):
         self.cb(f"cx:{ext}")
         self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "2 שעות"}})
         self.assertGreater(self.hg.state("salon")["session"]["remaining"], 149 * 60)
+
+
+class HistoryTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], db=os.path.join(tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.db.add_kid("reei", "x", "רעי")
+        self.tg = FakeTelegram()
+        self.tg.deleted = set()
+        self.hg = hs.HomeGuard(cfg, self.db, self.tg)
+
+    def cmd(self, text, chat=1, name="אורי"):
+        self.hg.handle_update({"message": {"chat": {"id": chat}, "from": {"first_name": name}, "text": text}})
+
+    def test_history_keeps_events_once_with_latest_text(self):
+        rid = self.hg.login("salon", "reei", "", "שיעורי בית")["request_id"]
+        self.hg.decide(f"ap:{rid}:allowlist:30", "אורי")
+        self.cmd("/history")
+        text = self.tg.sent()[-1]["text"]
+        self.assertEqual(text.count("רעי"), 1)  # one line, not one per parent
+        self.assertIn("✅ רעי", text)  # the edited (decided) version
+        self.assertEqual(self.db.q("SELECT markup FROM messages WHERE chat=1")[0]["markup"], None)
+
+    def test_audit_finds_deleted_messages_and_reports_who(self):
+        self.cmd("/start", chat=2, name="חגית")
+        self.hg.login("salon", "reei", "", "יוטיוב")
+        mid = self.db.q("SELECT mid FROM messages WHERE chat=2 AND text LIKE '%יוטיוב%'")[0]["mid"]
+        self.tg.deleted.add((2, mid))
+        checked, gone = self.hg.audit()
+        self.assertEqual(len(gone), 1)
+        report = self.tg.sent()[-1]["text"]
+        self.assertIn("נמחקו", report)
+        self.assertIn("אצל חגית", report)
+        self.assertIn("יוטיוב", report)
+        # the pending request's buttons are probed with the buttons it has, not removed
+        probe = [p for m, p in self.tg.calls if m == "editMessageReplyMarkup" and p["chat_id"] == 1]
+        self.assertTrue(any(p["reply_markup"]["inline_keyboard"] for p in probe))
+        self.assertEqual(self.hg.audit()[1], [])  # reported once
+        self.cmd("/history")
+        self.assertIn("🗑 נמחקה אצל חגית", self.tg.sent()[-1]["text"])
+
+    def test_audit_command_all_present(self):
+        self.hg.notify("בדיקה")
+        self.cmd("/audit")
+        self.assertIn("✅ בדיקת התאמה", self.tg.sent()[-1]["text"])
 
 
 class DnsTest(unittest.TestCase):
