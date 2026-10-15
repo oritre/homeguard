@@ -88,7 +88,7 @@ class SetupActivity : Activity() {
         box.removeAllViews()
         box.addView(title("🛡️ הגדרות HomeGuard"))
         box.addView(label("כתובת השרת בבית"))
-        val home = field(prefs.homeUrl.ifEmpty { "http://192.168.33.6:8800" }, "http://192.168.1.10:8800", InputType.TYPE_TEXT_VARIATION_URI)
+        val home = field(prefs.homeUrl.ifEmpty { "http://192.168.33.53:8800" }, "http://192.168.1.10:8800", InputType.TYPE_TEXT_VARIATION_URI)
         box.addView(home)
         box.addView(label("כתובת השרת מחוץ לבית (Tailscale Funnel)"))
         val remote = field(prefs.remoteUrl, "https://desktop.tailXXXX.ts.net", InputType.TYPE_TEXT_VARIATION_URI)

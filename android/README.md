@@ -40,7 +40,7 @@
 
 ## כתובת חיצונית (Tailscale Funnel)
 
-על המחשב שמריץ את השרת (שם Tailscale כבר מותקן), כמנהל:
+על המכונה שמריצה את השרת (היום ה-Pi של Home Assistant, דרך תוסף Tailscale), או על מחשב עם Tailscale:
 ```
 tailscale funnel --bg 8800
 ```
