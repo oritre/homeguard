@@ -122,6 +122,16 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(st["session"]["mode"], "offline")
         self.assertFalse(st["access_pending"])
 
+    def test_always_open_sites_command(self):
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "/block oritre.github.io"}})
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "/always https://oritre.github.io/english-app/"}})
+        st = self.hg.state("salon")
+        self.assertEqual(st["alwayslist"], ["oritre.github.io"])
+        self.assertNotIn("oritre.github.io", st["blocklist"])  # an exception replaces a block
+        self.assertIn("פתוחים תמיד", self.tg.sent()[-1]["text"])
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "/unalways oritre.github.io"}})
+        self.assertEqual(self.hg.state("salon")["alwayslist"], [])
+
     def test_extension_flow(self):
         rid = self.hg.login("salon", "noam", "1234")["request_id"]
         self.hg.decide(f"ap:{rid}:full:30", "אורי")
@@ -420,6 +430,24 @@ class DnsTest(unittest.TestCase):
         self.assertTrue(dnsfilter.is_allowed("tiktok.com", "open", allow, block))
         self.assertFalse(dnsfilter.is_allowed("notwikipedia.org", "allowlist", allow, block))
 
+    def test_always_open_sites_work_in_every_mode(self):
+        allow, block, always = ["wikipedia.org"], ["github.io"], ["oritre.github.io", "google.com"]
+        for mode in ("offline", "allowlist", "full"):
+            self.assertTrue(dnsfilter.is_allowed("oritre.github.io", mode, allow, block, always), mode)
+        self.assertTrue(dnsfilter.is_allowed("fonts.gstatic.com", "offline", allow, block, always))  # google.com deps
+        self.assertFalse(dnsfilter.is_allowed("other.github.io", "full", allow, block, always))
+        self.assertFalse(dnsfilter.is_allowed("wikipedia.org", "offline", allow, block, always))
+
+    def test_answer_ips(self):
+        q = dns_query("oritre.github.io")
+        hdr = struct.pack(">HHHHHH", 0x1234, 0x8180, 1, 3, 0, 0)
+        cname = b"\xc0\x0c" + struct.pack(">HHIH", 5, 1, 60, 2) + b"\xc0\x0c"
+        a = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + bytes([185, 199, 108, 153])
+        aaaa = b"\xc0\x0c" + struct.pack(">HHIH", 28, 1, 60, 16) + bytes(15) + b"\x01"
+        resp = hdr + q[12:] + cname + a + aaaa
+        self.assertEqual(dnsfilter.answer_ips(resp), ["185.199.108.153", "::1"])
+        self.assertEqual(dnsfilter.answer_ips(b"junk"), [])
+
     def test_nxdomain_packet(self):
         q = dns_query("tiktok.com")
         r = dnsfilter.nxdomain(q)
@@ -526,6 +554,23 @@ class AgentEndToEnd(unittest.TestCase):
         self.agent.poll_once()
         self.assertEqual(self.agent.mode, "offline")
         self.assertIsNone(self.local_call("GET", "/state")["session"])
+
+    def test_always_open_site_opens_firewall_when_offline(self):
+        allowed = []
+        orig = homeguard_agent.winctl.allow_ips
+        homeguard_agent.winctl.allow_ips = lambda ips: allowed.append(list(ips))
+        self.addCleanup(setattr, homeguard_agent.winctl, "allow_ips", orig)
+        self.hg.db.add_site("oritre.github.io", "always")
+        self.agent.poll_once()  # locked: offline
+        self.assertEqual(allowed, [[]])  # list changed: start clean
+        self.assertTrue(self.agent.dns_decide("oritre.github.io"))
+        self.assertFalse(self.agent.dns_decide("he.wikipedia.org"))
+        resp = (struct.pack(">HHHHHH", 1, 0x8180, 1, 1, 0, 0) + dns_query("oritre.github.io")[12:] +
+                b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + bytes([185, 199, 108, 153]))
+        self.agent.dns_answer("oritre.github.io", resp)
+        self.agent.dns_answer("oritre.github.io", resp)  # known address: no new rule
+        self.agent.dns_answer("he.wikipedia.org", resp)  # not an exception
+        self.assertEqual(allowed, [[], ["185.199.108.153"]])
 
     def test_master_login_opens_dns_immediately(self):
         self.hg.db.add_kid("hagit", "pw12", "חגית", "master")

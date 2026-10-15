@@ -48,6 +48,8 @@ class Agent:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lock = threading.RLock()
+        self.always_ips: set[str] = set()
+        self.applied_always: tuple = ()
         self.server_state: dict | None = None
         self.state_time = 0.0
         self.server_online = False
@@ -107,7 +109,25 @@ class Agent:
         with self.lock:
             st = self.server_state or {}
             mode = self.mode
-        return dnsfilter.is_allowed(domain, mode, st.get("allowlist", []), st.get("blocklist", []))
+        return dnsfilter.is_allowed(domain, mode, st.get("allowlist", []), st.get("blocklist", []),
+                                    st.get("alwayslist", []))
+
+    def dns_answer(self, domain: str, response: bytes) -> None:
+        """Internet off (firewall blocks everything): let through the addresses of always-open sites,
+        before the browser gets the answer and connects."""
+        with self.lock:
+            always = (self.server_state or {}).get("alwayslist", [])
+            if self.mode != "offline" or not always:
+                return
+            if not dnsfilter.matches(domain, dnsfilter.expand_allowlist(always)):
+                return
+            new = [ip for ip in dnsfilter.answer_ips(response) if ip not in self.always_ips]
+            if not new:
+                return
+            self.always_ips.update(new)
+            ips = sorted(self.always_ips)
+        log.info("always-open %s: allowing %s", domain, ", ".join(new))
+        winctl.allow_ips(ips)
 
     def upstream(self) -> str:
         return self.cfg["upstream_dns_exempt"] if self.mode == "open" else self.cfg["upstream_dns"]
@@ -139,6 +159,13 @@ class Agent:
             log.info("mode %s -> %s", self.mode, mode)
             self.mode = mode
             winctl.flush_dns()
+        always = tuple((self.server_state or {}).get("alwayslist", []))
+        if always != self.applied_always:  # the list changed: start over, addresses come back on lookup
+            self.applied_always = always
+            with self.lock:
+                self.always_ips.clear()
+            winctl.allow_ips([])
+            winctl.flush_dns()
         want_internet = mode != "offline"
         if want_internet != self.applied_internet:
             winctl.internet(want_internet)
@@ -166,11 +193,11 @@ class Agent:
 
     def run(self) -> None:
         server_ip = urlparse(self.cfg["server_url"]).hostname or ""
-        winctl.firewall_setup(server_ip)
+        winctl.firewall_setup(server_ip, self.cfg["upstream_dns"])
         winctl.internet(False)
         self.applied_internet = False
         winctl.point_dns_to_local()
-        dns = dnsfilter.DnsFilter(self.dns_decide, self.upstream, self.cfg["dns_port"])
+        dns = dnsfilter.DnsFilter(self.dns_decide, self.upstream, self.cfg["dns_port"], self.dns_answer)
         dns.start()
         local = ThreadingHTTPServer(("127.0.0.1", self.cfg["local_port"]), make_local_handler(self))
         threading.Thread(target=local.serve_forever, daemon=True).start()

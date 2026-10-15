@@ -46,9 +46,12 @@ def expand_allowlist(allow: list[str]) -> list[str]:
     return out
 
 
-def is_allowed(domain: str, mode: str, allow: list[str], block: list[str]) -> bool:
-    """mode: 'open' (parent, no filtering), 'full', 'allowlist', 'offline'."""
+def is_allowed(domain: str, mode: str, allow: list[str], block: list[str], always=()) -> bool:
+    """mode: 'open' (parent, no filtering), 'full', 'allowlist', 'offline'.
+    always: sites the parents keep open in every mode, even with the internet off."""
     if mode == "open":
+        return True
+    if always and matches(domain, expand_allowlist(list(always))):
         return True
     if mode == "offline":
         return matches(domain, ESSENTIAL)
@@ -77,6 +80,39 @@ def parse_qname(packet: bytes) -> tuple[str, int]:
     return ".".join(labels), i + 4
 
 
+def _skip_name(packet: bytes, i: int) -> int:
+    while True:
+        n = packet[i]
+        if n == 0:
+            return i + 1
+        if n & 0xC0 == 0xC0:
+            return i + 2
+        i += 1 + n
+
+
+def answer_ips(packet: bytes) -> list[str]:
+    """IPv4/IPv6 addresses in the answer section of a DNS response ([] if it can't be read)."""
+    try:
+        qd, an = struct.unpack(">HH", packet[4:8])
+        i = 12
+        for _ in range(qd):
+            i = _skip_name(packet, i) + 4
+        ips = []
+        for _ in range(an):
+            i = _skip_name(packet, i)
+            rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", packet[i:i + 10])
+            i += 10
+            data = packet[i:i + rdlen]
+            if rtype == 1 and rdlen == 4:
+                ips.append(socket.inet_ntop(socket.AF_INET, data))
+            elif rtype == 28 and rdlen == 16:
+                ips.append(socket.inet_ntop(socket.AF_INET6, data))
+            i += rdlen
+        return ips
+    except (IndexError, struct.error, OSError, ValueError):
+        return []
+
+
 def nxdomain(query: bytes) -> bytes:
     _, end = parse_qname(query)
     qid, flags = struct.unpack(">HH", query[:4])
@@ -85,11 +121,13 @@ def nxdomain(query: bytes) -> bytes:
 
 
 class DnsFilter:
-    def __init__(self, decide, upstream, port: int = 53):
-        """decide(domain) -> bool ; upstream() -> ip of resolver to forward to."""
+    def __init__(self, decide, upstream, port: int = 53, on_answer=None):
+        """decide(domain) -> bool ; upstream() -> ip of resolver to forward to ;
+        on_answer(domain, response) runs before the answer is handed back."""
         self.decide = decide
         self.upstream = upstream
         self.port = port
+        self.on_answer = on_answer
         self.servers = []
 
     def resolve(self, query: bytes, tcp: bool = False) -> bytes | None:
@@ -107,15 +145,21 @@ class DnsFilter:
                 with socket.create_connection((up, 53), timeout=4) as s:
                     s.sendall(struct.pack(">H", len(query)) + query)
                     ln = struct.unpack(">H", _recv_exact(s, 2))[0]
-                    return _recv_exact(s, ln)
-            with socket.socket(fam, socket.SOCK_DGRAM) as s:
-                s.settimeout(3)
-                s.sendto(query, (up, 53))
-                data, _ = s.recvfrom(4096)
-                return data
+                    data = _recv_exact(s, ln)
+            else:
+                with socket.socket(fam, socket.SOCK_DGRAM) as s:
+                    s.settimeout(3)
+                    s.sendto(query, (up, 53))
+                    data, _ = s.recvfrom(4096)
         except OSError as e:
             log.debug("upstream failed for %s: %s", name, e)
             return None
+        if self.on_answer:
+            try:
+                self.on_answer(name, data)
+            except Exception as e:  # never break name lookups
+                log.warning("on_answer %s: %s", name, e)
+        return data
 
     def start(self, hosts=("127.0.0.1", "::1")) -> None:
         flt = self

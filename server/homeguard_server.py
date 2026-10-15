@@ -251,7 +251,8 @@ class DB:
             return
         self.x("INSERT INTO sites (domain, list, expires, session_id) VALUES (?,?,NULL,NULL) "
                "ON CONFLICT(domain, list) DO UPDATE SET expires=NULL, session_id=NULL", (d, lst))
-        self.x("DELETE FROM sites WHERE domain=? AND list=?", (d, "block" if lst == "allow" else "allow"))
+        for other in {"allow": ("block",), "always": ("block",), "block": ("allow", "always")}[lst]:
+            self.x("DELETE FROM sites WHERE domain=? AND list=?", (d, other))
 
     def remove_site(self, domain: str, lst: str) -> None:
         self.x("DELETE FROM sites WHERE domain=? AND list=?", (normalize_domain(domain), lst))
@@ -491,6 +492,7 @@ class HomeGuard:
         temp_allowed = {r["domain"] for r in allow if r["expires"] is not None}
         return {"session": session, "extend_pending": pending_ext, "access_pending": access_pending,
                 "allowlist": [r["domain"] for r in allow],
+                "alwayslist": self.db.sites("always"),
                 "blocklist": [d for d in self.db.sites("block") if d not in temp_allowed],
                 "server_time": now}
 
@@ -710,11 +712,11 @@ class HomeGuard:
                 self.reply(chat, f"⏳ נוספו {parts[1]} דק' ל-{parts[0]}")
             else:
                 self.reply(chat, f"אין זמן פעיל במחשב {parts[0]}")
-        elif cmd in ("/allow", "/block", "/unallow", "/unblock"):
+        elif cmd in ("/allow", "/block", "/unallow", "/unblock", "/always", "/unalways"):
             if not arg:
                 self.reply(chat, f"שימוש: {cmd} example.com" + (" [דקות]" if cmd == "/allow" else ""))
                 return
-            lst = "allow" if "allow" in cmd else "block"
+            lst = "always" if "always" in cmd else "allow" if "allow" in cmd else "block"
             words = arg.replace(",", " ").split()
             domains = [w for w in words if valid_domain(normalize_domain(w)) and not re.fullmatch(r"[\d.]+", w)]
             rest = " ".join(w for w in words if w not in domains)
@@ -793,8 +795,10 @@ class HomeGuard:
                                 f" (זמני, עד {hhmm(r['expires'])})")
                  for r in self.db.site_rows("allow")]
         block = self.db.sites("block")
+        always = self.db.sites("always")
         return ("✅ אתרים מאושרים (במצב 'רק אתרים מאושרים'. אישור זמני גובר גם על חסימה):\n" +
-                ("\n".join(allow) or "—") + "\n\n⛔ אתרים חסומים (תמיד):\n" + ("\n".join(block) or "—"))
+                ("\n".join(allow) or "—") + "\n\n⛔ אתרים חסומים (תמיד):\n" + ("\n".join(block) or "—") +
+                "\n\n🟢 פתוחים תמיד (בכל מצב, גם 🚫 בלי אינטרנט):\n" + ("\n".join(always) or "—"))
 
     def kids_text(self) -> str:
         lines = []
@@ -823,6 +827,8 @@ HELP = """🛡️ HomeGuard – פקודות:
 /unallow site.com – להסיר מהמאושרים
 /block site.com – לחסום אתר תמיד
 /unblock site.com – לבטל חסימה
+/always site.com – אתר שפתוח בכל מצב, גם כשהאינטרנט חסום (🚫)
+/unalways site.com – להסיר מהפתוחים תמיד
 /sites – הרשימות
 
 👧 חשבונות:

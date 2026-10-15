@@ -110,14 +110,26 @@ def harden_user(username: str) -> None:
 RULE_PREFIX = "HomeGuard"
 
 
-def firewall_setup(server_ip: str) -> None:
+def firewall_setup(server_ip: str, upstream_dns: str) -> None:
     """Allow rules that stay in place while outbound traffic is blocked."""
-    run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-Server"])
-    run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-LAN"])
+    for name in ("Server", "LAN", "DNS"):
+        run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-{name}"])
     run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-Server", "dir=out",
          "action=allow", f"remoteip={server_ip}", "enable=yes"])
     run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-LAN", "dir=out",
          "action=allow", "remoteip=LocalSubnet", "enable=yes"])
+    # Name lookups keep working with the internet off, so always-open sites can be found.
+    for proto in ("UDP", "TCP"):
+        run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-DNS", "dir=out",
+             "action=allow", f"remoteip={upstream_dns}", f"protocol={proto}", "remoteport=53", "enable=yes"])
+
+
+def allow_ips(ips: list[str]) -> None:
+    """Addresses of the always-open sites, reachable while the internet is off. [] removes the rule."""
+    run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-Always"])
+    if ips:
+        run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-Always", "dir=out",
+             "action=allow", "remoteip=" + ",".join(ips), "enable=yes"])
 
 
 def internet(enabled: bool) -> None:
@@ -141,7 +153,7 @@ def flush_dns() -> None:
 def restore_defaults() -> None:
     """Used by the uninstaller."""
     internet(True)
-    run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-Server"])
-    run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-LAN"])
+    for name in ("Server", "LAN", "DNS", "Always"):
+        run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-{name}"])
     powershell("Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex "
                "-ResetServerAddresses }")

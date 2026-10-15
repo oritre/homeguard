@@ -17,6 +17,7 @@ import java.util.concurrent.Executors
  * - full / allowlist / open: only DNS goes through the tunnel; every lookup is checked
  *   against the site lists and either forwarded upstream or answered "no such site".
  * - offline: all traffic goes into the tunnel and is dropped (no internet at all).
+ *   With always-open sites, offline filters by name too and only those sites resolve.
  * Well-known public DNS servers are routed into the tunnel too, so apps can't skip the filter.
  */
 class FilterVpn : VpnService() {
@@ -31,6 +32,7 @@ class FilterVpn : VpnService() {
         @Volatile var mode = "offline"
         @Volatile var allow: List<String> = emptyList()
         @Volatile var block: List<String> = emptyList()
+        @Volatile var always: List<String> = emptyList()
         @Volatile var upstream = "1.1.1.3"
         @Volatile var running = false
         @Volatile var instance: FilterVpn? = null
@@ -52,7 +54,7 @@ class FilterVpn : VpnService() {
     /** (Re)build the tunnel when switching between "DNS only" and "block everything". */
     @Synchronized
     fun applyMode() {
-        val wantAll = mode == "offline"
+        val wantAll = mode == "offline" && always.isEmpty()
         val shape = if (wantAll) "all" else "dns"
         if (tun != null && tunnelMode == shape) return
         val b = Builder()
@@ -114,7 +116,7 @@ class FilterVpn : VpnService() {
     private fun resolve(query: ByteArray): ByteArray? {
         val name = Dns.qname(query) ?: return null
         val m = mode
-        if (!Policy.allowed(name, m, allow, block)) return Dns.nxdomain(query)
+        if (!Policy.allowed(name, m, allow, block, always)) return Dns.nxdomain(query)
         return try {
             DatagramSocket().use { s ->
                 protect(s)

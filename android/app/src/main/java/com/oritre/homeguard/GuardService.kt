@@ -144,8 +144,11 @@ class GuardService : Service() {
         val mode = s?.optString("mode", "offline") ?: "offline"
         FilterVpn.allow = list("allowlist")
         FilterVpn.block = list("blocklist")
+        val always = list("alwayslist")
+        val shapeChanged = FilterVpn.always.isEmpty() != always.isEmpty()
+        FilterVpn.always = always
         FilterVpn.upstream = prefs.upstreamDns.ifEmpty { "1.1.1.3" }
-        val changed = FilterVpn.mode != mode
+        val changed = FilterVpn.mode != mode || shapeChanged
         FilterVpn.mode = mode
         ensureVpn(changed)
 

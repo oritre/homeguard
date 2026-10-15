@@ -32,11 +32,13 @@ object Policy {
         return out
     }
 
-    /** mode: open (master), full, allowlist, offline */
-    fun allowed(domain: String, mode: String, allow: List<String>, block: List<String>): Boolean = when (mode) {
-        "open" -> true
-        "offline" -> matches(domain, ESSENTIAL)
-        "allowlist" -> !matches(domain, block) && matches(domain, expand(allow))
+    /** mode: open (master), full, allowlist, offline. always: sites the parents keep open in every mode. */
+    fun allowed(domain: String, mode: String, allow: List<String>, block: List<String>,
+                always: List<String> = emptyList()): Boolean = when {
+        mode == "open" -> true
+        always.isNotEmpty() && matches(domain, expand(always)) -> true
+        mode == "offline" -> matches(domain, ESSENTIAL)
+        mode == "allowlist" -> !matches(domain, block) && matches(domain, expand(allow))
         else -> !matches(domain, block)
     }
 }
