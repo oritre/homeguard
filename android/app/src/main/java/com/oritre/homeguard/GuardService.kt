@@ -51,8 +51,11 @@ class GuardService : Service() {
     @Volatile var vpnRevoked = false
     private var warned = mutableSetOf<Int>()
     private var lastSessionId = -1
-    @Volatile var hiddenUntil = 0L // emergency call
+    @Volatile var hiddenUntil = 0L // only while the VPN permission dialog is up
     @Volatile private var kidsFetchedAt = -1_000_000L
+    @Volatile private var appsReportedAt = -1_000_000L
+    private var reportedApps = ""
+    private var lastLocked: Boolean? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -71,7 +74,14 @@ class GuardService : Service() {
             startForeground(NOTIF_ID, n)
         }
         overlay = LockOverlay(this)
+        // Lock right away (e.g. straight after a restart), before the server has even answered.
+        FilterVpn.noNetApps = prefs.noNetApps
+        if (prefs.configured) {
+            AdminReceiver.harden(this) // also after an update, so new protections take effect without a cable
+            apply()
+        }
         startPolling()
+        Updater.schedule(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -116,12 +126,25 @@ class GuardService : Service() {
                 main.post { overlay?.setKids(list, passwordless) }
             }
         }
-        val st = api.state()
+        val st = api.state(Updater.currentVersion(this))
         if (st != null && !st.has("error")) {
             lastState = st
             lastStateAt = SystemClock.elapsedRealtime()
+            Updater.onServerSeq(this, st.optInt("update_seq", 0))
         }
         apply()
+        reportApps()
+    }
+
+    /** Tell the server which apps are installed, so parents can block them from the bot. */
+    private fun reportApps() {
+        if (SystemClock.elapsedRealtime() - appsReportedAt < 60_000) return
+        appsReportedAt = SystemClock.elapsedRealtime()
+        val apps = AppControl.launchable(this)
+        val sig = apps.joinToString("|") { it.first }
+        if (sig == reportedApps) return
+        val r = api.apps(apps)
+        if (r?.optBoolean("ok") == true) reportedApps = sig
     }
 
     /** Current approved session, counting down locally when the server can't be reached. */
@@ -148,6 +171,13 @@ class GuardService : Service() {
         val shapeChanged = FilterVpn.always.isEmpty() != always.isEmpty()
         FilterVpn.always = always
         FilterVpn.upstream = prefs.upstreamDns.ifEmpty { "1.1.1.3" }
+        // Master ("open") sessions are exempt from per-app rules, like from site rules.
+        // Before the server first answers (e.g. right after a restart) the last known rules stay in place.
+        if (lastState != null) {
+            val exempt = mode == "open"
+            AppControl.apply(this, if (exempt) emptySet() else list("apps_blocked").toSet(),
+                if (exempt) emptySet() else list("apps_nonet").toSet())
+        }
         val changed = FilterVpn.mode != mode || shapeChanged
         FilterVpn.mode = mode
         ensureVpn(changed)
@@ -168,6 +198,10 @@ class GuardService : Service() {
             }
         }
         val locked = s == null || vpnRevoked
+        if (locked != lastLocked) {
+            lastLocked = locked
+            AppControl.setLockedChrome(this, locked)
+        }
         main.post {
             overlay?.update(s, lastState?.optBoolean("extend_pending") ?: false, api.online)
             if (locked && SystemClock.elapsedRealtime() > hiddenUntil) overlay?.show() else overlay?.hide()
@@ -212,13 +246,6 @@ class GuardService : Service() {
     fun requestSite(domain: String) = background {
         val r = api.site(domain)
         toast(if (r?.optBoolean("ok") == true) "ביקשנו את $domain מאבא/אמא" else r?.optString("error", "אין חיבור") ?: "אין חיבור")
-    }
-
-    fun emergency() {
-        hiddenUntil = SystemClock.elapsedRealtime() + 120_000
-        overlay?.hide()
-        val dial = Intent(Intent.ACTION_DIAL).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        try { startActivity(dial) } catch (_: Exception) {}
     }
 
     fun pollOnceAsync() = background { pollOnce() }

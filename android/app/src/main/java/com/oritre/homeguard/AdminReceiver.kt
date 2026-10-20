@@ -17,6 +17,11 @@ class AdminReceiver : DeviceAdminReceiver() {
     companion object {
         fun component(ctx: Context) = ComponentName(ctx, AdminReceiver::class.java)
 
+        // No VPN changes, no safe mode, no extra users, and no factory reset from Settings
+        // (a reset would wipe HomeGuard; parents first use "remove protection" in the setup screen).
+        private val RESTRICTIONS = listOf(UserManager.DISALLOW_CONFIG_VPN, UserManager.DISALLOW_SAFE_BOOT,
+            UserManager.DISALLOW_ADD_USER, UserManager.DISALLOW_FACTORY_RESET)
+
         fun isOwner(ctx: Context): Boolean =
             ctx.getSystemService(DevicePolicyManager::class.java).isDeviceOwnerApp(ctx.packageName)
 
@@ -31,10 +36,10 @@ class AdminReceiver : DeviceAdminReceiver() {
             }
             attempt("חסימת הסרה") { dpm.setUninstallBlocked(admin, ctx.packageName, true) }
             attempt("VPN קבוע") { dpm.setAlwaysOnVpnPackage(admin, ctx.packageName, false) }
-            for (r in listOf(UserManager.DISALLOW_CONFIG_VPN, UserManager.DISALLOW_SAFE_BOOT,
-                    UserManager.DISALLOW_ADD_USER)) {
+            for (r in RESTRICTIONS) {
                 attempt(r) { dpm.addUserRestriction(admin, r) }
             }
+            attempt("מסך הבית") { AppControl.claimHome(ctx) }
             if (Build.VERSION.SDK_INT >= 29) {
                 attempt("DNS פרטי") {
                     dpm.setGlobalPrivateDnsModeOpportunistic(admin)
@@ -51,8 +56,8 @@ class AdminReceiver : DeviceAdminReceiver() {
             val admin = component(ctx)
             try { dpm.setUninstallBlocked(admin, ctx.packageName, false) } catch (_: Exception) {}
             try { dpm.setAlwaysOnVpnPackage(admin, null, false) } catch (_: Exception) {}
-            for (r in listOf(UserManager.DISALLOW_CONFIG_VPN, UserManager.DISALLOW_SAFE_BOOT,
-                    UserManager.DISALLOW_ADD_USER, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)) {
+            AppControl.releaseAll(ctx)
+            for (r in RESTRICTIONS + UserManager.DISALLOW_CONFIG_PRIVATE_DNS) {
                 try { dpm.clearUserRestriction(admin, r) } catch (_: Exception) {}
             }
             try { dpm.clearDeviceOwnerApp(ctx.packageName) } catch (_: Exception) {}

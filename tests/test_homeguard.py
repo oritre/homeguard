@@ -675,5 +675,55 @@ class AgentEndToEnd(unittest.TestCase):
         self.assertEqual(self.agent.mode, "offline")
 
 
+class AndroidAppsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.tg = FakeTelegram()
+        self.hg = hs.HomeGuard(cfg, self.db, self.tg)
+
+    def apps(self, *pkgs):
+        return [{"pkg": p, "label": p.split(".")[-1]} for p in pkgs]
+
+    def test_first_report_is_quiet_new_app_is_announced(self):
+        self.hg.report_apps("tablet", self.apps("com.whatsapp", "com.google.android.youtube"))
+        self.assertEqual(self.tg.sent(), [])
+        self.hg.report_apps("tablet", self.apps("com.whatsapp", "com.google.android.youtube", "com.roblox.client"))
+        msgs = self.tg.sent()
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("com.roblox.client", msgs[0]["text"])
+        data = [b["callback_data"] for b in msgs[0]["reply_markup"]["inline_keyboard"][0]]
+        self.assertEqual([d.split(":")[2] for d in data], ["ok", "nonet", "blocked"])
+
+    def test_rules_reach_the_device_state(self):
+        self.hg.report_apps("tablet", self.apps("com.whatsapp", "com.roblox.client"))
+        ids = {r["pkg"]: r["id"] for r in self.db.q("SELECT id, pkg FROM apps")}
+        self.hg.handle_update({"callback_query": {"id": "1", "from": {"id": 1}, "data": f"ar:{ids['com.roblox.client']}:blocked",
+                                                  "message": {"chat": {"id": 1}, "message_id": 5, "reply_markup": {
+                                                      "inline_keyboard": [self.hg.app_buttons(
+                                                          self.db.q("SELECT * FROM apps WHERE pkg='com.roblox.client'")[0])]}}}})
+        self.hg.set_app_rule(ids["com.whatsapp"], "nonet")
+        st = self.hg.state("tablet", "android", 7)
+        self.assertEqual(st["apps_blocked"], ["com.roblox.client"])
+        self.assertEqual(st["apps_nonet"], ["com.whatsapp"])
+        edited = self.tg.sent("editMessageReplyMarkup")[-1]["reply_markup"]["inline_keyboard"][0]
+        self.assertTrue(edited[2]["text"].startswith("• "))
+        self.assertEqual(self.db.q("SELECT version FROM pcs WHERE name='tablet'")[0]["version"], 7)
+
+    def test_update_command_bumps_sequence(self):
+        self.assertEqual(self.hg.state("tablet", "android", 7)["update_seq"], 0)
+        self.hg.handle_command(1, "/update", "")
+        self.assertEqual(self.hg.state("tablet", "android")["update_seq"], 1)
+        self.assertIn("tablet (גרסה 7)", self.tg.sent()[-1]["text"])
+
+    def test_apps_list_has_rule_buttons(self):
+        self.hg.report_apps("tablet", self.apps("com.whatsapp"))
+        self.hg.handle_command(1, "/apps", "")
+        kb = self.tg.sent()[-1]["reply_markup"]["inline_keyboard"]
+        self.assertEqual(kb[0][0]["text"], "whatsapp")
+        self.assertTrue(kb[1][0]["text"].startswith("• ✅"))
+
+
 if __name__ == "__main__":
     unittest.main()

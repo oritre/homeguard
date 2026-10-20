@@ -46,7 +46,8 @@ class Api(private val prefs: Prefs) {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-    fun state(): JSONObject? = call("GET", "/api/state?pc=${enc(prefs.deviceName)}&user=android", null)
+    fun state(version: Int = 0): JSONObject? =
+        call("GET", "/api/state?pc=${enc(prefs.deviceName)}&user=android&ver=$version", null)
     fun kids(): JSONObject? = call("GET", "/api/kids", null)
     fun requestStatus(id: Int): JSONObject? = call("GET", "/api/request?id=$id", null)
 
@@ -64,4 +65,8 @@ class Api(private val prefs: Prefs) {
     fun end() = post("/api/end")
     fun site(domain: String) = post("/api/site", "domain" to domain)
     fun passwd(user: String, old: String, new: String) = post("/api/passwd", "username" to user, "old" to old, "new" to new)
+    fun apps(list: List<Pair<String, String>>) = post("/api/apps", "apps" to org.json.JSONArray(
+        list.map { JSONObject().put("pkg", it.first).put("label", it.second) }))
+    /** A one-line message to the parents in the bot (updates and their results). */
+    fun notice(text: String) = post("/api/notice", "text" to text)
 }

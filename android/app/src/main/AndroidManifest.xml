@@ -9,6 +9,19 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- To list the installed apps for the parents, and to find the phone's own launcher. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+    </queries>
 
     <application
         android:label="HomeGuard"
@@ -35,6 +48,21 @@
             android:taskAffinity=".request"
             android:windowSoftInputMode="adjustResize"
             android:theme="@android:style/Theme.Material.NoActionBar" />
+
+        <!-- Home screen while protected: the device always starts into HomeGuard. -->
+        <activity
+            android:name=".HomeGate"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:stateNotNeeded="true"
+            android:theme="@android:style/Theme.Material.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".GuardService"
@@ -78,6 +106,10 @@
 
         <receiver
             android:name=".ActionReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".Updater$Result"
             android:exported="false" />
     </application>
 </manifest>

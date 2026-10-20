@@ -150,9 +150,6 @@ class LockOverlay(private val svc: GuardService) {
             Screen.PROTECTION_OFF -> renderProtectionOff()
         }
         if (message.isNotEmpty()) add(text(message, 15f, danger), 24)
-        if (screen != Screen.PROTECTION_OFF) {
-            add(button("📞 שיחת חירום", false) { svc.emergency() }, 48)
-        }
     }
 
     private fun renderPickName() {
@@ -330,7 +327,7 @@ class LockOverlay(private val svc: GuardService) {
         add(text("🛡️ ההגנה כבויה", 28f, bold = true))
         add(text("המכשיר נעול עד שההגנה של HomeGuard תופעל שוב.", 16f, muted))
         add(button("הפעלת ההגנה") {
-            svc.hiddenUntil = android.os.SystemClock.elapsedRealtime() + 60_000 // leave room for the VPN dialog
+            svc.hiddenUntil = android.os.SystemClock.elapsedRealtime() + 20_000 // leave room for the VPN dialog
             hide()
             val i = Intent(svc, SetupActivity::class.java)
                 .putExtra(SetupActivity.EXTRA_FIX_VPN, true)

@@ -33,6 +33,8 @@ class FilterVpn : VpnService() {
         @Volatile var allow: List<String> = emptyList()
         @Volatile var block: List<String> = emptyList()
         @Volatile var always: List<String> = emptyList()
+        /** Packages whose internet the parents blocked (every lookup they make gets "no such site"). */
+        @Volatile var noNetApps: Set<String> = emptySet()
         @Volatile var upstream = "1.1.1.3"
         @Volatile var running = false
         @Volatile var instance: FilterVpn? = null
@@ -101,7 +103,8 @@ class FilterVpn : VpnService() {
                 val packet = buf.copyOf(n)
                 val q = Dns.udpQuery(packet) ?: continue // anything that isn't DNS is dropped
                 pool.execute {
-                    val answer = resolve(q.payload) ?: return@execute
+                    val answer = (if (fromNoNetApp(q)) Dns.nxdomain(q.payload) else resolve(q.payload))
+                        ?: return@execute
                     val reply = Dns.udpReply(q, answer)
                     synchronized(output) {
                         try { output.write(reply) } catch (_: Exception) {}
@@ -111,6 +114,25 @@ class FilterVpn : VpnService() {
         }
         reader = t
         t.start()
+    }
+
+    private val uidPackages = java.util.concurrent.ConcurrentHashMap<Int, List<String>>()
+
+    /** Which app sent this lookup (Android 10+), and is its internet blocked? */
+    private fun fromNoNetApp(q: Dns.Query): Boolean {
+        val blocked = noNetApps
+        if (blocked.isEmpty() || android.os.Build.VERSION.SDK_INT < 29) return false
+        return try {
+            val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            val uid = cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_UDP,
+                java.net.InetSocketAddress(InetAddress.getByAddress(q.srcIp), q.srcPort),
+                java.net.InetSocketAddress(InetAddress.getByAddress(q.dstIp), q.dstPort))
+            if (uid < 0) return false
+            val pkgs = uidPackages.getOrPut(uid) { packageManager.getPackagesForUid(uid)?.toList() ?: emptyList() }
+            pkgs.any { it in blocked }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun resolve(query: ByteArray): ByteArray? {

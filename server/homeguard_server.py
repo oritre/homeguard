@@ -164,6 +164,11 @@ class DB:
                     chat INTEGER NOT NULL, mid INTEGER NOT NULL, ts REAL NOT NULL,
                     text TEXT NOT NULL, markup TEXT, deleted REAL,
                     PRIMARY KEY (chat, mid));
+                CREATE TABLE IF NOT EXISTS apps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, pkg TEXT NOT NULL UNIQUE,
+                    label TEXT NOT NULL, rule TEXT NOT NULL DEFAULT 'ok', first_seen REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS device_apps (
+                    pc TEXT NOT NULL, pkg TEXT NOT NULL, PRIMARY KEY (pc, pkg));
                 """
             )
             for table, col, decl in (("kids", "pw_plain", "TEXT"),
@@ -172,7 +177,8 @@ class DB:
                                      ("kids", "disabled", "INTEGER NOT NULL DEFAULT 0"),
                                      ("sites", "expires", "REAL"),
                                      ("sites", "session_id", "INTEGER"),
-                                     ("requests", "detail", "TEXT")):
+                                     ("requests", "detail", "TEXT"),
+                                     ("pcs", "version", "INTEGER")):
                 if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             self.conn.commit()
@@ -560,11 +566,12 @@ class HomeGuard:
             self.edit_all(json.loads(rows[0]["messages"]),
                           f"↩️ {self.db.kid_display(rows[0]['kid'])} ביטל/ה את הבקשה ({rows[0]['pc']})")
 
-    def state(self, pc: str, win_user: str = "") -> dict:
+    def state(self, pc: str, win_user: str = "", version: int | None = None) -> dict:
         now = time.time()
-        self.db.x("INSERT INTO pcs (name, last_seen, win_user) VALUES (?,?,?) "
-                  "ON CONFLICT(name) DO UPDATE SET last_seen=excluded.last_seen, win_user=excluded.win_user",
-                  (pc, now, win_user))
+        self.db.x("INSERT INTO pcs (name, last_seen, win_user, version) VALUES (?,?,?,?) "
+                  "ON CONFLICT(name) DO UPDATE SET last_seen=excluded.last_seen, win_user=excluded.win_user, "
+                  "version=COALESCE(excluded.version, version)",
+                  (pc, now, win_user, version))
         s = self.db.active_session(pc)
         session = None
         if s and s["ends"] > now:
@@ -580,7 +587,67 @@ class HomeGuard:
                 "allowlist": [r["domain"] for r in allow],
                 "alwayslist": self.db.sites("always"),
                 "blocklist": [d for d in self.db.sites("block") if d not in temp_allowed],
+                "apps_blocked": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='blocked'")],
+                "apps_nonet": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='nonet'")],
+                "update_seq": int(self.db.setting("update_seq", "0")),
                 "server_time": now}
+
+    # ---- apps on Android devices
+    APP_RULES = {"ok": "✅ מותרת", "nonet": "📵 בלי אינטרנט", "blocked": "⛔ חסומה"}
+
+    def report_apps(self, pc: str, apps: list) -> dict:
+        """The device's launcher apps. A new app on a device we already know is announced with buttons."""
+        known_device = bool(self.db.q("SELECT 1 FROM device_apps WHERE pc=? LIMIT 1", (pc,)))
+        current = {}
+        for a in apps:
+            pkg, label = str(a.get("pkg", "")).strip(), str(a.get("label", "")).strip()
+            if re.fullmatch(r"[A-Za-z0-9_.]{2,200}", pkg):
+                current[pkg] = label[:80] or pkg
+        before = {r["pkg"] for r in self.db.q("SELECT pkg FROM device_apps WHERE pc=?", (pc,))}
+        for pkg, label in current.items():
+            self.db.x("INSERT INTO apps (pkg, label, first_seen) VALUES (?,?,?) "
+                      "ON CONFLICT(pkg) DO UPDATE SET label=excluded.label", (pkg, label, time.time()))
+        self.db.x("DELETE FROM device_apps WHERE pc=?", (pc,))
+        for pkg in current:
+            self.db.x("INSERT OR IGNORE INTO device_apps (pc, pkg) VALUES (?,?)", (pc, pkg))
+        if known_device:
+            for pkg in sorted(set(current) - before):
+                app = self.db.q("SELECT * FROM apps WHERE pkg=?", (pkg,))[0]
+                self.notify(f"📲 אפליקציה חדשה במכשיר '{pc}': {app['label']} ({pkg})\n"
+                            f"מצב כרגע: {self.APP_RULES[app['rule']]}", [self.app_buttons(app)])
+        return {"ok": True}
+
+    def app_buttons(self, app) -> list:
+        return [{"text": ("• " if app["rule"] == r else "") + name, "callback_data": f"ar:{app['id']}:{r}"}
+                for r, name in self.APP_RULES.items()]
+
+    def set_app_rule(self, app_id: int, rule: str) -> str:
+        rows = self.db.q("SELECT * FROM apps WHERE id=?", (app_id,))
+        if not rows or rule not in self.APP_RULES:
+            return "לא נמצא"
+        self.db.x("UPDATE apps SET rule=? WHERE id=?", (rule, app_id))
+        return f"{rows[0]['label']}: {self.APP_RULES[rule]}"
+
+    def apps_keyboard(self, query: str = "") -> tuple[str, list]:
+        """One row per app on any device: its name, then the three rules (the current one marked)."""
+        q = query.lower()
+        rows = [a for a in self.db.q("SELECT * FROM apps WHERE pkg IN (SELECT pkg FROM device_apps) ORDER BY label")
+                if not q or q in a["label"].lower() or q in a["pkg"].lower()]
+        if not rows:
+            return ("אין עדיין אפליקציות. הן יופיעו כאן אחרי שמכשיר אנדרואיד יתחבר לשרת." if not q
+                    else f"לא נמצאה אפליקציה בשם '{query}'"), []
+        kb = []
+        for a in rows[:24]:
+            kb.append([{"text": f"{a['label']}", "callback_data": f"ai:{a['id']}"}])
+            kb.append(self.app_buttons(a))
+        more = f"\n(מוצגות 24 מתוך {len(rows)}. לחיפוש: /apps <שם>)" if len(rows) > 24 else ""
+        return ("📱 אפליקציות באנדרואיד. לוחצים על המצב הרצוי:\n"
+                "✅ מותרת · 📵 בלי אינטרנט (חוסם לפי שמות אתרים) · ⛔ חסומה (לא נפתחת בכלל)" + more), kb
+
+    def request_update(self) -> int:
+        seq = int(self.db.setting("update_seq", "0")) + 1
+        self.db.set_setting("update_seq", str(seq))
+        return seq
 
     def request_extension(self, pc: str) -> dict:
         s = self.db.active_session(pc)
@@ -724,6 +791,13 @@ class HomeGuard:
             elif data.startswith("lk:"):
                 pc = data[3:]
                 answer = "ננעל" if self.lock(pc) else "כבר נעול"
+            elif data.startswith("ai:"):
+                rows = self.db.q("SELECT * FROM apps WHERE id=?", (int(data[3:]),))
+                answer = f"{rows[0]['label']}: {self.APP_RULES[rows[0]['rule']]}" if rows else "לא נמצא"
+            elif data.startswith("ar:"):
+                _, app_id, rule = data.split(":")
+                answer = self.set_app_rule(int(app_id), rule)
+                self.refresh_app_row(cq, int(app_id))
             else:
                 answer = self.decide(data, who)
             if self.tg:
@@ -748,6 +822,18 @@ class HomeGuard:
             return
         self.awaiting_time.pop(chat, None)
         self.handle_command(chat, cmd, arg)
+
+    def refresh_app_row(self, cq: dict, app_id: int) -> None:
+        """Move the "•" mark in the tapped message to the rule just chosen."""
+        msg = cq.get("message")
+        rows = self.db.q("SELECT * FROM apps WHERE id=?", (app_id,))
+        if not self.tg or not msg or not rows:
+            return
+        kb = msg.get("reply_markup", {}).get("inline_keyboard", [])
+        new = [self.app_buttons(rows[0]) if any(b.get("callback_data", "").startswith(f"ar:{app_id}:") for b in row)
+               else row for row in kb]
+        self.tg.call("editMessageReplyMarkup", chat_id=msg["chat"]["id"], message_id=msg["message_id"],
+                     reply_markup={"inline_keyboard": new})
 
     def remember_name(self, chat: int, name: str) -> None:
         if name and self.db.setting(f"name:{chat}") != name:
@@ -830,6 +916,17 @@ class HomeGuard:
             self.reply(chat, self.sites_text())
         elif cmd == "/sites":
             self.reply(chat, self.sites_text())
+        elif cmd == "/apps":
+            text, kb = self.apps_keyboard(arg)
+            self.reply(chat, text, kb or None)
+        elif cmd == "/update":
+            self.request_update()
+            devices = [f"{p['name']} (גרסה {p['version']})" for p in
+                       self.db.q("SELECT name, version FROM pcs WHERE version IS NOT NULL AND version>0 ORDER BY name")]
+            self.reply(chat, "📲 ביקשתי מהמכשירים לבדוק עדכון עכשיו. כל מכשיר ידווח כאן כשהוא מתעדכן.\n" +
+                       ("מכשירים: " + ", ".join(devices) if devices else
+                        "עוד אין מכשיר אנדרואיד שמדווח גרסה.") +
+                       "\n(בלי /update הם בודקים לבד כל 6 שעות)")
         elif cmd == "/history":
             count = int(arg) if arg.isdigit() else 20
             for chunk in self.history_text(max(1, min(count, 200))):
@@ -932,6 +1029,10 @@ HELP = """🛡️ HomeGuard – פקודות:
 /unalways site.com – להסיר מהפתוחים תמיד
 /sites – הרשימות
 
+📱 אנדרואיד:
+/apps [שם] – האפליקציות במכשירים: ✅ מותרת · 📵 בלי אינטרנט · ⛔ חסומה. אפליקציה חדשה שמותקנת מגיעה לכאן עם כפתורים
+/update – לעדכן עכשיו את האפליקציה במכשירים (בלי כבל; הם בודקים לבד גם כל 6 שעות)
+
 📜 היסטוריה:
 /history [מספר] – האירועים האחרונים, גם אם ההודעות נמחקו מהצ'אט
 /audit – בדיקת התאמה עכשיו: האם נמחקו הודעות של הבוט (נבדק גם אוטומטית כל חצי שעה)
@@ -981,7 +1082,8 @@ def make_handler(hg: HomeGuard):
             u = urlparse(self.path)
             qs = {k: v[0] for k, v in parse_qs(u.query).items()}
             if u.path == "/api/state":
-                self._send(200, hg.state(qs.get("pc", ""), qs.get("user", "")))
+                ver = qs.get("ver", "")
+                self._send(200, hg.state(qs.get("pc", ""), qs.get("user", ""), int(ver) if ver.isdigit() else None))
             elif u.path == "/api/kids":
                 self._send(200, hg.kids_for_lock_screen())
             elif u.path == "/api/request":
@@ -1018,6 +1120,12 @@ def make_handler(hg: HomeGuard):
             elif path == "/api/end":
                 hg.end_by_kid(pc)
                 self._send(200, {"ok": True})
+            elif path == "/api/apps":
+                apps = body.get("apps", [])
+                self._send(200, hg.report_apps(pc, apps if isinstance(apps, list) else []))
+            elif path == "/api/notice":
+                hg.notify(str(body.get("text", ""))[:500] or f"הודעה מ-{pc}")
+                self._send(200, {"ok": True})
             else:
                 self._send(404, {"error": "not found"})
 
@@ -1040,6 +1148,8 @@ def run(cfg: dict) -> None:
         {"command": "allow", "description": "אישור אתר"},
         {"command": "block", "description": "חסימת אתר"},
         {"command": "fullnet", "description": "להציע גם אינטרנט מלא"},
+        {"command": "apps", "description": "אפליקציות באנדרואיד: לחסום או בלי אינטרנט"},
+        {"command": "update", "description": "לעדכן את האפליקציה במכשירים"},
         {"command": "kids", "description": "חשבונות וסיסמאות"},
         {"command": "addkid", "description": "הוספת ילד"},
         {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
