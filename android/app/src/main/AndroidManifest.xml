@@ -64,6 +64,18 @@
             </intent-filter>
         </activity>
 
+        <!-- As the home screen we get "Add to home screen" requests; accepting them lets Chrome install web apps. -->
+        <activity
+            android:name=".PinShortcutActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.content.pm.action.CONFIRM_PIN_SHORTCUT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".GuardService"
             android:exported="false"
