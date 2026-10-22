@@ -6,14 +6,17 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.RemoteInput
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
@@ -88,13 +91,25 @@ class GuardService : Service() {
 
     override fun onDestroy() {
         poller?.interrupt()
+        try { unregisterReceiver(screenOn) } catch (_: Exception) {}
         main.post { overlay?.hide() }
         instance = null
         super.onDestroy()
     }
 
     // ------------------------------------------------------------------ polling
+    // Every 4 seconds while the screen is on; once a minute while it's off, so the Wi-Fi can sleep.
+    // Turning the screen on polls right away, so the lock and approvals are never stale.
+    private val wake = Object()
+    private val screenOn = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            synchronized(wake) { wake.notifyAll() }
+        }
+    }
+
     private fun startPolling() {
+        registerReceiver(screenOn, IntentFilter(Intent.ACTION_SCREEN_ON))
+        val power = getSystemService(PowerManager::class.java)
         val t = Thread {
             while (!Thread.currentThread().isInterrupted) {
                 try {
@@ -102,7 +117,8 @@ class GuardService : Service() {
                 } catch (e: Exception) {
                     Log.w(TAG, "poll failed", e)
                 }
-                try { Thread.sleep(4000) } catch (_: InterruptedException) { break }
+                val delay = if (power.isInteractive) 4_000L else 60_000L
+                try { synchronized(wake) { wake.wait(delay) } } catch (_: InterruptedException) { break }
             }
         }
         poller = t
