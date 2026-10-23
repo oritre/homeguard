@@ -66,6 +66,15 @@ powershell -ExecutionPolicy Bypass -File install\install-agent.ps1 `
 
 הסרה: `install\uninstall-agent.ps1` מחזיר את חומת האש וה-DNS לברירת המחדל.
 
+## ממשק ניהול באינטרנט
+
+כל מה שהבוט עושה, גם בדף אינטרנט עם הסברים: בקשות עם כפתורי אישור, מכשירים (נעילה, הוספת זמן, פתיחת גישה בלי לחכות לבקשה), שלוש רשימות האתרים, אפליקציות באנדרואיד, חשבונות, הגדרות והיסטוריה.
+
+1. בבוט: `/webpass <סיסמה של 8 תווים לפחות>`, ואחר כך מוחקים את ההודעה מהצ'אט.
+2. נכנסים ל-`http://<כתובת השרת>:8800/admin`, ומחוץ לבית לכתובת ה-Funnel עם `/admin`. כדאי לשים את כתובת ה-Funnel ב-`public_url` בהגדרות, ו-`/web` יציג אותה.
+
+אבטחה: הסיסמה נשמרת מגובבת. כל כניסה מדווחת בטלגרם, ו-5 סיסמאות שגויות ב-10 דקות חוסמות את הדף ומתריעות. כניסה תקפה 30 יום (עוגייה HttpOnly). בהגדרות אפשר ליצור טוקן לסקריפטים (`Authorization: Bearer` + `X-HG: 1`) ולבטל כל כניסה. שינוי סיסמה מנתק את כולם.
+
 ## הגנות מעקיפה
 
 - המחשב נעול כברירת מחדל: בלי אישור, חומת האש חוסמת יציאה לאינטרנט. אם השרת לא זמין, הזמן שכבר אושר ממשיך לרדת ואז ננעל.
@@ -77,7 +86,8 @@ powershell -ExecutionPolicy Bypass -File install\install-agent.ps1 `
 ## מבנה
 
 ```
-server/homeguard_server.py   שרת + בוט טלגרם (Python, בלי ספריות חיצוניות)
+server/homeguard_server.py   שרת + בוט טלגרם + ממשק ניהול (Python, בלי ספריות חיצוניות)
+server/admin.html            דף ממשק הניהול
 agent/homeguard_agent.py     סוכן SYSTEM: חומת אש, DNS, API מקומי, שומר
 agent/dnsfilter.py           שרת DNS מסנן (UDP+TCP)
 agent/winctl.py              קריאות Windows (WTS, netsh, PowerShell, רישום)

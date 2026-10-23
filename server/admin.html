@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>HomeGuard · ניהול</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🛡️%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f4f6fb; --card: #ffffff; --text: #1b2333; --muted: #5d6779; --line: #e1e5ee;
+  --accent: #3346c8; --accent-soft: #e8ebfb; --ok: #1a8f4c; --ok-soft: #e3f5ea;
+  --warn: #b26a00; --warn-soft: #fdf1dc; --bad: #c62f3a; --bad-soft: #fbe5e7;
+  --on-accent: #ffffff; --radius: 14px; --shadow: 0 1px 2px rgba(20,30,60,.06), 0 4px 14px rgba(20,30,60,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11151f; --card: #1a202d; --text: #e7eaf2; --muted: #9aa3b5; --line: #2a3242;
+    --accent: #8d9bff; --accent-soft: #252c4a; --ok: #4fcf86; --ok-soft: #173326;
+    --warn: #f0b04a; --warn-soft: #3a2d14; --bad: #ff7b85; --bad-soft: #3d1c21;
+    --shadow: none; --on-accent: #11151f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11151f; --card: #1a202d; --text: #e7eaf2; --muted: #9aa3b5; --line: #2a3242;
+  --accent: #8d9bff; --accent-soft: #252c4a; --ok: #4fcf86; --ok-soft: #173326;
+  --warn: #f0b04a; --warn-soft: #3a2d14; --bad: #ff7b85; --bad-soft: #3d1c21; --shadow: none; --on-accent: #11151f;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Rubik, Arial, sans-serif; }
+button, input, select { font: inherit; color: inherit; }
+header { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line); }
+.bar { max-width: 980px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 10px; }
+.bar h1 { font-size: 18px; margin: 0; flex: 1; }
+.conn { font-size: 12px; color: var(--muted); }
+nav { max-width: 980px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto; padding: 0 12px 8px; scrollbar-width: none; }
+nav button { border: 0; background: transparent; padding: 7px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap; color: var(--muted); }
+nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+nav .badge { background: var(--bad); color: #fff; border-radius: 999px; font-size: 11px; padding: 0 6px; margin-inline-start: 4px; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+section { display: none; }
+section.on { display: block; }
+h2 { font-size: 17px; margin: 22px 0 8px; }
+h2:first-child { margin-top: 4px; }
+.explain { color: var(--muted); font-size: 13.5px; margin: 0 0 12px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; margin-bottom: 12px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row.between { justify-content: space-between; }
+.title { font-weight: 600; font-size: 16px; }
+.sub { color: var(--muted); font-size: 13px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--muted); }
+.dot.on { background: var(--ok); }
+.pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.big { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.btn { border: 1px solid var(--line); background: var(--card); padding: 7px 12px; border-radius: 10px; cursor: pointer; min-height: 36px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.btn.danger { color: var(--bad); }
+.btn.small { padding: 3px 9px; min-height: 30px; font-size: 13px; }
+.btn:disabled { opacity: .5; cursor: default; }
+input[type=text], input[type=password], select { border: 1px solid var(--line); background: var(--bg); border-radius: 10px; padding: 7px 10px; min-height: 36px; min-width: 0; }
+input.grow { flex: 1; min-width: 140px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.seg button { border: 0; background: var(--card); padding: 5px 10px; cursor: pointer; font-size: 13px; }
+.seg button + button { border-inline-start: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: var(--on-accent); }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.list li:first-child { border-top: 0; }
+.empty { color: var(--muted); font-size: 13.5px; padding: 6px 0; }
+.req { border-inline-start: 4px solid var(--warn); }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; max-width: calc(100% - 32px); z-index: 20; display: none; white-space: pre-line; }
+.toast.err { background: var(--bad); color: #fff; }
+.login { max-width: 380px; margin: 12vh auto; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; direction: ltr; unicode-bidi: plaintext; word-break: break-all; }
+details summary { cursor: pointer; color: var(--accent); font-size: 13.5px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+td, th { text-align: start; padding: 6px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+code { background: var(--accent-soft); padding: 0 5px; border-radius: 5px; font-size: 13px; }
+.hidden { display: none !important; }
+@media (max-width: 560px) { main { padding: 12px 16px; } .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="login" class="login card hidden">
+  <h2>🛡️ HomeGuard · ניהול</h2>
+  <p class="explain" id="loginNote">הכניסה מוגנת בסיסמה. כל כניסה מדווחת לכם בטלגרם.</p>
+  <form id="loginForm" class="row">
+    <input type="password" id="pw" class="grow" placeholder="סיסמה" autocomplete="current-password" required>
+    <button class="btn primary">כניסה</button>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <div class="bar"><h1>🛡️ HomeGuard</h1><span class="conn" id="conn"></span></div>
+  <nav id="tabs"></nav>
+</header>
+<main>
+<section data-tab="home" data-label="🏠 מצב">
+  <div id="pendingWrap">
+    <h2>🔔 בקשות שמחכות לכם</h2>
+    <p class="explain">בקשות מהילדים: כניסה למכשיר, אתר או עוד זמן. אפשר לאשר כאן או בטלגרם. מה שתבחרו פה מתעדכן גם בהודעה בטלגרם.</p>
+    <div id="pending"></div>
+  </div>
+  <h2>💻 מכשירים</h2>
+  <p class="explain">כל מחשב וטאבלט שמחובר לשרת. 🟢 = דיבר עם השרת בדקה וחצי האחרונות. "פתיחת גישה" נותנת זמן בלי לחכות לבקשה. "נעילה" סוגרת את הזמן מיד.</p>
+  <div class="row" style="margin-bottom:10px"><button class="btn danger" data-act="lockall">🔒 לנעול את כל המכשירים</button></div>
+  <div id="devices" class="grid"></div>
+</section>
+
+<section data-tab="sites" data-label="🌐 אתרים">
+  <h2>רשימות אתרים</h2>
+  <p class="explain">הסינון לפי שם אתר. אתר כולל גם את כל תתי-הכתובות שלו (wikipedia.org כולל he.wikipedia.org). אפשר להוסיף כמה אתרים בבת אחת, מופרדים ברווח או בפסיק.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="title">✅ אתרים מאושרים</div>
+      <p class="explain">עובדים במצב "רק אתרים מאושרים". בלי זמן = תמיד. עם זמן (30, 2 שעות, 18:30) = אישור זמני, שגובר גם על חסימה ונמחק לבד כשהזמן נגמר.</p>
+      <form class="row" data-site-form="allow"><input type="text" class="grow" name="domain" placeholder="example.com" required><input type="text" name="minutes" placeholder="זמן (לא חובה)" style="width:120px"><button class="btn primary">הוספה</button></form>
+      <ul class="list" id="list-allow"></ul>
+    </div>
+    <div class="card">
+      <div class="title">⛔ אתרים חסומים</div>
+      <p class="explain">חסומים תמיד, גם במצב "אינטרנט מלא". אישור זמני לאתר חסום פותח אותו רק לזמן שנקבע.</p>
+      <form class="row" data-site-form="block"><input type="text" class="grow" name="domain" placeholder="tiktok.com" required><button class="btn primary">חסימה</button></form>
+      <ul class="list" id="list-block"></ul>
+    </div>
+    <div class="card">
+      <div class="title">🟢 פתוחים תמיד</div>
+      <p class="explain">פתוחים בכל מצב, גם 🚫 בלי אינטרנט וגם כשהמכשיר נעול. מתאים לאתרי לימוד ולשירותים שאפליקציה צריכה (למשל סנכרון).</p>
+      <form class="row" data-site-form="always"><input type="text" class="grow" name="domain" placeholder="oritre.github.io" required><button class="btn primary">הוספה</button></form>
+      <ul class="list" id="list-always"></ul>
+    </div>
+  </div>
+</section>
+
+<section data-tab="apps" data-label="📱 אפליקציות">
+  <h2>אפליקציות באנדרואיד</h2>
+  <p class="explain">כל האפליקציות שמותקנות במכשירי האנדרואיד. ✅ מותרת · 📵 בלי אינטרנט: כל שם אתר שהיא מחפשת נחסם · ⛔ חסומה: האייקון נהיה אפור והיא לא נפתחת. במצב 🔓 מאסטר הכללים לא חלים.</p>
+  <div class="row" style="margin-bottom:10px"><input type="text" id="appSearch" class="grow" placeholder="חיפוש לפי שם או חבילה"><select id="appFilter"><option value="">הכל</option><option value="ok">✅ מותרות</option><option value="nonet">📵 בלי אינטרנט</option><option value="blocked">⛔ חסומות</option></select></div>
+  <div class="card"><ul class="list" id="apps"></ul></div>
+</section>
+
+<section data-tab="kids" data-label="👧 ילדים">
+  <h2>חשבונות</h2>
+  <p class="explain">ילד/ה נכנס/ת עם שם משתמש (ובחירה בהגדרות: גם סיסמה) ואתם מאשרים. חשבון 👑 מאסטר נכנס בלי אישור, בלי סינון ובלי הגבלת זמן, ותמיד עם סיסמה. חשבון חדש מקבל סיסמה זמנית, ובכניסה הראשונה בוחרים סיסמה אישית.</p>
+  <div class="card">
+    <div class="title">➕ חשבון חדש</div>
+    <form id="kidForm" class="row" style="margin-top:8px">
+      <input type="text" name="username" placeholder="שם משתמש באנגלית" required style="direction:ltr;width:170px">
+      <input type="text" name="display" placeholder="שם לתצוגה" class="grow">
+      <label class="row sub"><input type="checkbox" name="master"> 👑 מאסטר</label>
+      <button class="btn primary">הוספה</button>
+    </form>
+  </div>
+  <div id="kids" class="grid"></div>
+</section>
+
+<section data-tab="settings" data-label="⚙️ הגדרות">
+  <h2>כללי</h2>
+  <div class="card">
+    <ul class="list">
+      <li><span><b>🌐 להציע "אינטרנט מלא"</b><br><span class="sub">כבוי: בבקשות כניסה מוצעים רק "אתרים מאושרים" ו"בלי אינטרנט". דלוק: גם אינטרנט מלא (חוץ מאתרים חסומים).</span></span><span class="seg" data-setting="fullnet"><button data-v="0">כבוי</button><button data-v="1">דלוק</button></span></li>
+      <li><span><b>🔑 כניסה עם סיסמה</b><br><span class="sub">כבוי: הילד רק בוחר את השם שלו, והאישור שלכם הוא הבדיקה. דלוק: צריך גם סיסמה. מאסטר תמיד עם סיסמה.</span></span><span class="seg" data-setting="passwords"><button data-v="0">כבוי</button><button data-v="1">דלוק</button></span></li>
+    </ul>
+  </div>
+  <h2>📲 עדכון האפליקציה באנדרואיד</h2>
+  <div class="card">
+    <p class="explain">המכשירים בודקים לבד כל 6 שעות אם יש גרסה חדשה ב-GitHub ומתקינים בשקט. הכפתור מבקש מהם לבדוק עכשיו.</p>
+    <div class="row between"><span id="versions" class="sub"></span><button class="btn" data-act="update">לבדוק עדכון עכשיו</button></div>
+  </div>
+  <h2>🔎 בדיקת התאמה</h2>
+  <div class="card">
+    <p class="explain">בודקת שהודעות הבוט מהשבוע האחרון עדיין נמצאות בצ'אטים שלכם בטלגרם, כדי לגלות אם מישהו מחק אישור. רצה לבד כל חצי שעה. אם נמחקה הודעה, תקבלו דיווח בטלגרם.</p>
+    <button class="btn" data-act="audit">לבדוק עכשיו</button>
+  </div>
+  <h2>🔐 גישה לממשק</h2>
+  <div class="card">
+    <div class="title">שינוי סיסמה</div>
+    <p class="explain">8 תווים לפחות. אחרי השינוי כל הכניסות והטוקנים מנותקים. אפשר גם מהבוט: <code>/webpass &lt;סיסמה&gt;</code>.</p>
+    <form id="pwForm" class="row"><input type="password" name="old" placeholder="סיסמה נוכחית" autocomplete="current-password" required><input type="password" name="new" placeholder="סיסמה חדשה" autocomplete="new-password" minlength="8" required><button class="btn primary">שינוי</button></form>
+  </div>
+  <div class="card">
+    <div class="title">כניסות פעילות וטוקנים</div>
+    <p class="explain">כל דפדפן שנכנס, וכל טוקן לסקריפטים (למשל Claude). טוקן נשלח בכותרת <code>Authorization: Bearer …</code> יחד עם <code>X-HG: 1</code>, ותקף שנה. אפשר לבטל כל אחד.</p>
+    <form id="tokenForm" class="row"><input type="text" name="label" class="grow" placeholder="שם לטוקן (למשל Claude)" required><button class="btn">יצירת טוקן</button></form>
+    <div id="newToken" class="hidden" style="margin-top:10px"></div>
+    <ul class="list" id="tokens" style="margin-top:8px"></ul>
+  </div>
+  <button class="btn danger" data-act="logout">יציאה מהממשק</button>
+</section>
+
+<section data-tab="history" data-label="📜 היסטוריה">
+  <h2>אירועים אחרונים</h2>
+  <p class="explain">כל מה שהבוט דיווח לכם, מהחדש לישן, פעם אחת לכל אירוע. 🗑 = ההודעה נמחקה מהצ'אט של אחד ההורים (ומתי זה התגלה).</p>
+  <div class="row" style="margin-bottom:10px"><select id="histCount"><option>50</option><option>100</option><option>200</option><option>500</option></select><button class="btn" id="histLoad">רענון</button></div>
+  <div class="card"><ul class="list" id="history"></ul></div>
+</section>
+
+<section data-tab="help" data-label="❓ עזרה">
+  <h2>איך HomeGuard עובד</h2>
+  <div class="card">
+    <p>המכשירים נעולים עד שאתם מאשרים. ילד/ה בוחר/ת שם במסך הנעילה, ואתם מקבלים בקשה בטלגרם (או כאן) עם כפתורים: סוג גישה × משך זמן. כשהזמן נגמר, המכשיר ננעל שוב. מתוך הטיימר אפשר לבקש עוד זמן או אתר מסוים.</p>
+    <table>
+      <tr><th>סוג גישה</th><th>מה פתוח</th></tr>
+      <tr><td>✅ רק אתרים מאושרים</td><td>האתרים ברשימת המאושרים + הפתוחים תמיד. כל השאר חסום. ברירת המחדל.</td></tr>
+      <tr><td>🌐 אינטרנט מלא</td><td>הכל חוץ מהחסומים. מוצע רק אם "להציע אינטרנט מלא" דלוק.</td></tr>
+      <tr><td>🚫 בלי אינטרנט</td><td>רק הפתוחים תמיד. המכשיר פתוח למשחקים ואפליקציות בלי רשת.</td></tr>
+      <tr><td>🔓 פתוח לגמרי</td><td>חשבון מאסטר: בלי סינון, בלי כללי אפליקציות ובלי הגבלת זמן.</td></tr>
+      <tr><td>♾️ ללא הגבלת זמן</td><td>פתוח עד שנועלים ידנית.</td></tr>
+    </table>
+  </div>
+  <h2>כתיבת זמן</h2>
+  <div class="card"><p>בכל שדה זמן אפשר לכתוב: <code>45</code> (דקות) · <code>90 דק</code> · <code>2 שעות</code> · <code>1.5ש</code> · <code>18:30</code> או <code>עד 18:30</code> (עד השעה הזאת, היום או מחר).</p></div>
+  <h2>פקודות הבוט בטלגרם</h2>
+  <div class="card"><table id="cmds"></table></div>
+  <h2>גישה מסקריפטים</h2>
+  <div class="card">
+    <p class="explain">כל הפעולות בממשק זמינות גם כ-API. יוצרים טוקן בהגדרות ושולחים אותו בכל בקשה.</p>
+    <table>
+      <tr><td class="mono">GET /admin/api/state</td><td>כל המצב: מכשירים, בקשות, ילדים, אתרים, אפליקציות, הגדרות</td></tr>
+      <tr><td class="mono">GET /admin/api/history?count=50</td><td>היסטוריה</td></tr>
+      <tr><td class="mono">POST /admin/api/action</td><td>גוף JSON עם <code>action</code>: lock · extend · grant · decide · site_add · site_remove · app_rule · kid_add · kid_setpw · kid_resetpw · kid_disable · kid_enable · kid_lock · kid_remove · setting · update · audit · token_new · token_revoke</td></tr>
+    </table>
+    <p class="mono" style="margin-top:8px">curl -H "Authorization: Bearer TOKEN" -H "X-HG: 1" -d '{"action":"lock","pc":"*"}' https://SERVER/admin/api/action</p>
+  </div>
+</section>
+</main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "class") e.className = v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : String(c));
+  return e;
+}
+
+let S = null, skew = 0, tab = "home";
+const fmtMin = (m) => !m ? "ללא הגבלה" : m % 60 ? `${m} דק'` : m === 60 ? "שעה" : m === 120 ? "שעתיים" : `${m / 60} שעות`;
+const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+const dayTime = (ts) => new Date(ts * 1000).toLocaleString("he-IL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const nowSec = () => Date.now() / 1000 + skew;
+function left(ends) {
+  const s = Math.max(0, Math.round(ends - nowSec()));
+  const hh = Math.floor(s / 3600), mm = Math.floor(s % 3600 / 60), ss = s % 60;
+  return (hh ? hh + ":" + String(mm).padStart(2, "0") : mm) + ":" + String(ss).padStart(2, "0");
+}
+
+function toast(msg, err) {
+  const t = $("#toast");
+  t.textContent = msg; t.className = "toast" + (err ? " err" : ""); t.style.display = "block";
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = "none", err ? 6000 : 3500);
+}
+
+async function api(path, body) {
+  const opt = body ? { method: "POST", headers: { "Content-Type": "application/json", "X-HG": "1" }, body: JSON.stringify(body) } : {};
+  const r = await fetch(path, { ...opt, credentials: "same-origin" });
+  if (r.status === 401) { showLogin(); throw new Error("צריך להתחבר"); }
+  return r.json();
+}
+
+async function act(body, after) {
+  try {
+    const res = await api("/admin/api/action", body);
+    if (!res.ok) { toast(res.error || "שגיאה", true); return res; }
+    if (res.message) toast(res.message);
+    if (res.relogin) { showLogin(); return res; }
+    await refresh(true);
+    after && after(res);
+    return res;
+  } catch (e) { toast(e.message, true); }
+}
+
+function showLogin(note) {
+  $("#app").classList.add("hidden"); $("#login").classList.remove("hidden");
+  if (note) $("#loginNote").textContent = note;
+  $("#pw").focus();
+}
+
+$("#loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const res = await api("/admin/api/login", { password: $("#pw").value });
+  if (!res.ok) { toast(res.error, true); return; }
+  $("#pw").value = "";
+  start();
+});
+
+// ---------------------------------------------------------------- tabs
+function buildTabs() {
+  const nav = $("#tabs"); nav.textContent = "";
+  for (const s of $$("section")) {
+    const b = h("button", { "data-t": s.dataset.tab, onclick: () => go(s.dataset.tab) }, s.dataset.label);
+    if (s.dataset.tab === "home") b.append(h("span", { class: "badge hidden", id: "reqBadge" }));
+    nav.append(b);
+  }
+}
+function go(t) {
+  tab = t;
+  for (const s of $$("section")) s.classList.toggle("on", s.dataset.tab === t);
+  for (const b of $$("#tabs button")) b.classList.toggle("on", b.dataset.t === t);
+  try { localStorage.setItem("hg_tab", t); } catch {}
+  if (t === "history") loadHistory();
+  if (t === "settings") loadTokens();
+}
+
+// ---------------------------------------------------------------- render
+function durationPicker(options, withUnlimited) {
+  const sel = h("select", {}, options.map((m) => h("option", { value: m }, fmtMin(m))),
+    withUnlimited ? h("option", { value: "0" }, "♾️ ללא הגבלה") : null, h("option", { value: "custom" }, "⏱ זמן אחר…"));
+  const custom = h("input", { type: "text", placeholder: "45 / 2 שעות / 18:30", class: "hidden", style: "width:150px" });
+  sel.addEventListener("change", () => custom.classList.toggle("hidden", sel.value !== "custom"));
+  return { el: [sel, custom], value: () => sel.value === "custom" ? custom.value.trim() : sel.value };
+}
+
+function modePicker(modes) {
+  return h("select", {}, modes.map((m) => h("option", { value: m }, S.modes[m])));
+}
+
+function renderPending() {
+  const box = $("#pending"); box.textContent = "";
+  const n = S.pending.length;
+  const badge = $("#reqBadge");
+  if (badge) { badge.textContent = n; badge.classList.toggle("hidden", !n); }
+  if (!n) { box.append(h("p", { class: "empty" }, "אין בקשות פתוחות 👍")); return; }
+  for (const r of S.pending) {
+    const card = h("div", { class: "card req" });
+    const when = h("span", { class: "sub" }, `${r.pc} · ${hhmm(r.created)}`);
+    if (r.kind === "login") {
+      const re = r.session_mode ? ` (עכשיו: ${S.modes[r.session_mode]})` : "";
+      card.append(h("div", { class: "row between" }, h("span", { class: "title" }, `🧒 ${r.display} מבקש/ת ${r.session_mode ? "הרשאה חדשה" : "להיכנס"}${re}`), when));
+      if (r.detail) card.append(h("p", { class: "sub" }, `💬 ${r.detail}`));
+      const mode = modePicker(S.settings.login_modes);
+      const dur = durationPicker(S.settings.durations, true);
+      card.append(h("div", { class: "row", style: "margin-top:8px" }, mode, ...dur.el,
+        h("button", { class: "btn primary", onclick: () => act({ action: "decide", id: r.id, mode: mode.value, minutes: dur.value() }) }, "✅ אישור"),
+        h("button", { class: "btn danger", onclick: () => act({ action: "decide", id: r.id, choice: "deny" }) }, "❌ לא עכשיו")));
+    } else if (r.kind === "site") {
+      card.append(h("div", { class: "row between" }, h("span", { class: "title" }, `🌐 ${r.display} מבקש/ת את `, h("span", { class: "mono" }, r.detail)), when));
+      const dur = durationPicker(S.settings.durations, false);
+      card.append(h("div", { class: "row", style: "margin-top:8px" },
+        h("button", { class: "btn primary", onclick: () => act({ action: "decide", id: r.id, choice: "session" }) }, "עד סוף הזמן שלו/ה"),
+        ...dur.el, h("button", { class: "btn", onclick: () => act({ action: "decide", id: r.id, minutes: dur.value() }) }, "לזמן הזה"),
+        h("button", { class: "btn", onclick: () => act({ action: "decide", id: r.id, minutes: "0" }) }, "♾️ תמיד"),
+        h("button", { class: "btn danger", onclick: () => act({ action: "decide", id: r.id, choice: "deny" }) }, "❌ לא")));
+    } else {
+      const l = r.session_ends ? ` (נשאר ${left(r.session_ends)})` : "";
+      card.append(h("div", { class: "row between" }, h("span", { class: "title" }, `⏳ ${r.display} מבקש/ת עוד זמן${l}`), when));
+      const dur = durationPicker(S.settings.extend_options, false);
+      card.append(h("div", { class: "row", style: "margin-top:8px" }, ...dur.el,
+        h("button", { class: "btn primary", onclick: () => act({ action: "decide", id: r.id, minutes: dur.value() }) }, "➕ להוסיף"),
+        h("button", { class: "btn danger", onclick: () => act({ action: "decide", id: r.id, choice: "deny" }) }, "❌ לא")));
+    }
+    box.append(card);
+  }
+}
+
+function renderDevices() {
+  const box = $("#devices"); box.textContent = "";
+  if (!S.devices.length) { box.append(h("p", { class: "empty" }, "עוד לא התחבר אף מכשיר.")); return; }
+  const kids = S.kids.filter((k) => !k.disabled);
+  for (const d of S.devices) {
+    const s = d.session;
+    const card = h("div", { class: "card" });
+    card.append(h("div", { class: "row between" },
+      h("span", { class: "row" }, h("span", { class: "dot" + (d.online ? " on" : "") }), h("span", { class: "title" }, (d.android ? "📱 " : "💻 ") + d.name)),
+      h("span", { class: "sub" }, d.online ? (d.version ? `גרסה ${d.version}` : "מחובר") : d.last_seen ? `נראה ${dayTime(d.last_seen)}` : "לא נראה")));
+    if (s) {
+      card.append(h("div", { style: "margin:10px 0 4px" }, h("span", { class: "pill ok" }, s.mode_name), " ", h("b", {}, s.display)));
+      card.append(h("div", { class: "big", "data-ends": s.ends || "" }, s.ends ? left(s.ends) : "♾️"));
+      card.append(h("div", { class: "sub" }, s.ends ? `עד ${hhmm(s.ends)}` : "ללא הגבלת זמן, עד שנועלים"));
+      const ext = durationPicker(S.settings.extend_options, false);
+      card.append(h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "btn danger", onclick: () => act({ action: "lock", pc: d.name }) }, "🔒 נעילה"),
+        s.ends ? [...ext.el, h("button", { class: "btn", onclick: () => act({ action: "extend", pc: d.name, minutes: ext.value() }) }, "➕ זמן")] : null));
+    } else {
+      card.append(h("div", { style: "margin:10px 0" }, h("span", { class: "pill bad" }, "🔒 נעול")));
+    }
+    const kid = h("select", {}, kids.map((k) => h("option", { value: k.username }, (k.role === "master" ? "👑 " : "") + k.display)));
+    const mode = modePicker(["allowlist", "full", "offline", "open"]);
+    const dur = durationPicker(S.settings.durations, true);
+    card.append(h("details", { style: "margin-top:10px" }, h("summary", {}, s ? "החלפת גישה…" : "פתיחת גישה…"),
+      h("div", { class: "row", style: "margin-top:8px" }, kid, mode, ...dur.el,
+        h("button", { class: "btn primary", onclick: () => act({ action: "grant", pc: d.name, username: kid.value, mode: mode.value, minutes: dur.value() }) }, "פתיחה"))));
+    box.append(card);
+  }
+}
+
+function siteLabel(r) {
+  if (!r.expires) return null;
+  return h("span", { class: "pill warn" }, r.session ? `עד סוף הזמן של הילד (${hhmm(r.expires)})` : `זמני, עד ${hhmm(r.expires)}`);
+}
+function renderSites() {
+  for (const lst of ["allow", "block", "always"]) {
+    const ul = $("#list-" + lst); ul.textContent = "";
+    const rows = S.sites[lst];
+    if (!rows.length) ul.append(h("li", { class: "empty" }, "ריק"));
+    for (const r of rows) ul.append(h("li", {}, h("span", { class: "row" }, h("span", { class: "mono" }, r.domain), siteLabel(r)),
+      h("button", { class: "btn small danger", onclick: () => act({ action: "site_remove", list: lst, domain: r.domain }) }, "הסרה")));
+  }
+}
+
+function renderApps() {
+  const ul = $("#apps"); ul.textContent = "";
+  const q = $("#appSearch").value.trim().toLowerCase(), f = $("#appFilter").value;
+  const rows = S.apps.filter((a) => (!q || a.label.toLowerCase().includes(q) || a.pkg.toLowerCase().includes(q)) && (!f || a.rule === f));
+  if (!rows.length) ul.append(h("li", { class: "empty" }, S.apps.length ? "לא נמצאו אפליקציות" : "אין עדיין אפליקציות. הן יופיעו אחרי שמכשיר אנדרואיד יתחבר."));
+  for (const a of rows) {
+    ul.append(h("li", {}, h("span", {}, h("b", {}, a.label), h("br"), h("span", { class: "sub mono" }, a.pkg), h("span", { class: "sub" }, " · " + a.devices.join(", "))),
+      h("span", { class: "seg" }, Object.entries(S.app_rules).map(([rule, name]) =>
+        h("button", { class: a.rule === rule ? "on" : "", onclick: () => a.rule !== rule && act({ action: "app_rule", id: a.id, rule }) }, name)))));
+  }
+}
+
+function renderKids() {
+  const box = $("#kids"); box.textContent = "";
+  for (const k of S.kids) {
+    const flags = [k.role === "master" && h("span", { class: "pill" }, "👑 מאסטר"), k.must_set && h("span", { class: "pill warn" }, "סיסמה זמנית"), k.disabled && h("span", { class: "pill bad" }, "⛔ מושבת")];
+    const online = S.devices.filter((d) => d.session && d.session.kid === k.username).map((d) => d.name);
+    const pw = h("input", { type: "text", placeholder: "סיסמה חדשה", style: "width:130px" });
+    box.append(h("div", { class: "card" },
+      h("div", { class: "row between" }, h("span", { class: "title" }, k.display), h("span", { class: "sub mono" }, k.username)),
+      h("div", { class: "row", style: "margin:6px 0" }, ...flags, online.length ? h("span", { class: "pill ok" }, "מחובר/ת: " + online.join(", ")) : null),
+      h("div", { class: "sub" }, "סיסמה: ", h("span", { class: "mono" }, k.password ?? "לא ידועה")),
+      h("div", { class: "row", style: "margin-top:10px" },
+        online.length ? h("button", { class: "btn small danger", onclick: () => act({ action: "kid_lock", username: k.username }) }, "🔒 נעילה") : null,
+        h("button", { class: "btn small", onclick: () => act({ action: "kid_resetpw", username: k.username }) }, "סיסמה זמנית"),
+        k.disabled ? h("button", { class: "btn small", onclick: () => act({ action: "kid_enable", username: k.username }) }, "✅ הפעלה")
+                   : h("button", { class: "btn small", onclick: () => act({ action: "kid_disable", username: k.username }) }, "⛔ השבתה"),
+        h("button", { class: "btn small danger", onclick: () => confirm(`למחוק את ${k.display}?`) && act({ action: "kid_remove", username: k.username }) }, "🗑 מחיקה")),
+      h("div", { class: "row", style: "margin-top:8px" }, pw, h("button", { class: "btn small", onclick: () => act({ action: "kid_setpw", username: k.username, password: pw.value }) }, "קביעת סיסמה"))));
+  }
+}
+
+function renderSettings() {
+  for (const seg of $$("[data-setting]")) {
+    const v = S.settings[seg.dataset.setting] ? "1" : "0";
+    for (const b of $$("button", seg)) b.classList.toggle("on", b.dataset.v === v);
+  }
+  const vs = S.devices.filter((d) => d.version).map((d) => `${d.name}: ${d.version}`);
+  $("#versions").textContent = vs.length ? "גרסאות: " + vs.join(" · ") : "אין עדיין מכשיר אנדרואיד שמדווח גרסה";
+}
+
+function render() {
+  renderPending(); renderDevices(); renderSites(); renderApps(); renderKids(); renderSettings();
+}
+
+async function refresh(force) {
+  // The automatic refresh doesn't redraw under someone who is typing or picking from a list.
+  const busy = document.activeElement && document.activeElement.closest("main") && /INPUT|SELECT/.test(document.activeElement.tagName);
+  const openDetails = $$("#devices details[open]").length;
+  try {
+    const st = await api("/admin/api/state");
+    S = st; skew = st.now - Date.now() / 1000;
+    $("#conn").textContent = "עודכן " + hhmm(st.now);
+    if (force || (!busy && !openDetails)) render();
+  } catch (e) { $("#conn").textContent = "⚠️ אין חיבור לשרת"; }
+}
+
+function tickClocks() {
+  for (const el of $$("[data-ends]")) if (el.dataset.ends) el.textContent = left(+el.dataset.ends);
+}
+
+async function loadHistory() {
+  const ul = $("#history"); ul.textContent = "";
+  const res = await api("/admin/api/history?count=" + $("#histCount").value);
+  if (!res.events.length) ul.append(h("li", { class: "empty" }, "אין עדיין היסטוריה"));
+  for (const e of res.events) {
+    ul.append(h("li", { style: "display:block" }, h("div", { class: "sub" }, dayTime(e.ts)), h("div", { style: "white-space:pre-line" }, e.text),
+      e.deleted.map((d) => h("div", { class: "pill bad" }, `🗑 נמחקה אצל ${d.by} (התגלה ${dayTime(d.at)})`))));
+  }
+}
+
+async function loadTokens() {
+  const ul = $("#tokens"); ul.textContent = "";
+  const res = await api("/admin/api/tokens");
+  for (const t of res.tokens) {
+    ul.append(h("li", {}, h("span", {}, h("b", {}, t.label), t.current ? h("span", { class: "pill ok" }, " הכניסה הזאת") : null, h("br"),
+      h("span", { class: "sub" }, `נוצר ${dayTime(t.created)} · שימוש אחרון ${t.last_used ? dayTime(t.last_used) : "—"}${t.ip ? " · " + t.ip : ""}`)),
+      t.current ? null : h("button", { class: "btn small danger", onclick: async () => { await act({ action: "token_revoke", id: t.id }); loadTokens(); } }, "ביטול")));
+  }
+}
+
+// ---------------------------------------------------------------- forms
+for (const f of $$("[data-site-form]")) {
+  f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const fd = new FormData(f);
+    act({ action: "site_add", list: f.dataset.siteForm, domain: fd.get("domain"), minutes: fd.get("minutes") || "" }, () => f.reset());
+  });
+}
+$("#kidForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  act({ action: "kid_add", username: fd.get("username"), display: fd.get("display"), master: !!fd.get("master") }, () => e.target.reset());
+});
+$("#pwForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  act({ action: "web_password", old: fd.get("old"), new: fd.get("new") }, () => e.target.reset());
+});
+$("#tokenForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const res = await act({ action: "token_new", label: new FormData(e.target).get("label") });
+  if (res && res.ok) {
+    e.target.reset();
+    const box = $("#newToken"); box.textContent = ""; box.classList.remove("hidden");
+    box.append(h("div", { class: "pill warn" }, "הטוקן מוצג פעם אחת בלבד:"), h("div", { class: "mono", style: "margin-top:6px" }, res.token),
+      h("button", { class: "btn small", style: "margin-top:6px", onclick: () => navigator.clipboard.writeText(res.token).then(() => toast("הועתק")) }, "העתקה"));
+    loadTokens();
+  }
+});
+for (const seg of $$("[data-setting]")) for (const b of $$("button", seg))
+  b.addEventListener("click", () => act({ action: "setting", key: seg.dataset.setting, value: b.dataset.v === "1" }));
+document.addEventListener("click", async (e) => {
+  const a = e.target.closest("[data-act]"); if (!a) return;
+  const what = a.dataset.act;
+  if (what === "lockall") confirm("לנעול את כל המכשירים עכשיו?") && act({ action: "lock", pc: "*" });
+  else if (what === "update") act({ action: "update" });
+  else if (what === "audit") { a.disabled = true; await act({ action: "audit" }); a.disabled = false; }
+  else if (what === "logout") { await api("/admin/api/logout", {}); showLogin("יצאתם מהממשק."); }
+});
+$("#appSearch").addEventListener("input", () => S && renderApps());
+$("#appFilter").addEventListener("change", () => S && renderApps());
+$("#histLoad").addEventListener("click", loadHistory);
+$("#histCount").addEventListener("change", loadHistory);
+
+const CMDS = [
+  ["/status", "מי מחובר ולכמה זמן, עם כפתור נעילה לכל מכשיר"], ["/lock [מכשיר|משתמש]", "לנעול עכשיו. בלי שם: כל המכשירים"],
+  ["/extend <מכשיר> <דקות>", "להוסיף זמן"], ["/sites", "שלוש רשימות האתרים"], ["/allow site.com [זמן]", "לאשר אתר, תמיד או לזמן"],
+  ["/unallow site.com", "להסיר מהמאושרים"], ["/block site.com", "לחסום תמיד"], ["/unblock site.com", "לבטל חסימה"],
+  ["/always site.com", "פתוח בכל מצב"], ["/unalways site.com", "להסיר מהפתוחים תמיד"], ["/fullnet on|off", "להציע גם אינטרנט מלא"],
+  ["/apps [שם]", "אפליקציות באנדרואיד עם כפתורי כללים"], ["/update", "לבקש מהמכשירים לבדוק עדכון"],
+  ["/kids", "חשבונות וסיסמאות"], ["/addkid <משתמש> [שם]", "ילד/ה חדש/ה עם סיסמה זמנית"], ["/addmaster <משתמש> [שם]", "חשבון מאסטר"],
+  ["/setpw <משתמש> <סיסמה>", "לקבוע סיסמה"], ["/resetpw <משתמש>", "סיסמה זמנית חדשה"], ["/disable · /enable <משתמש>", "להשבית / להחזיר"],
+  ["/rmkid <משתמש>", "למחוק חשבון"], ["/passwords on|off", "כניסה עם סיסמה או רק בחירת שם"], ["/history [מספר]", "אירועים אחרונים"],
+  ["/audit", "בדיקה אם נמחקו הודעות"], ["/web", "הקישור לממשק הזה"], ["/webpass <סיסמה>", "סיסמה לממשק (מנתק את כל הכניסות)"],
+];
+$("#cmds").append(...CMDS.map(([c, d]) => h("tr", {}, h("td", { class: "mono", style: "white-space:nowrap" }, c), h("td", {}, d))));
+
+// ---------------------------------------------------------------- start
+let timer = null;
+async function start() {
+  const who = await api("/admin/api/whoami");
+  if (!who.signed_in) {
+    showLogin(who.password_set ? null : "עוד לא נקבעה סיסמה. שלחו לבוט בטלגרם: /webpass <סיסמה של 8 תווים לפחות>");
+    return;
+  }
+  $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
+  buildTabs();
+  let saved = "home"; try { saved = localStorage.getItem("hg_tab") || "home"; } catch {}
+  go($(`section[data-tab="${saved}"]`) ? saved : "home");
+  await refresh(true);
+  clearInterval(timer);
+  timer = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  setInterval(tickClocks, 1000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && S) refresh(); });
+start();
+</script>
+</body>
+</html>

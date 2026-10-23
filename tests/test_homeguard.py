@@ -725,5 +725,129 @@ class AndroidAppsTest(unittest.TestCase):
         self.assertTrue(kb[1][0]["text"].startswith("• ✅"))
 
 
+class WebAdminTest(unittest.TestCase):
+    """The parents' web page over real HTTP: sign-in, CSRF guard, and the actions."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.port = free_port()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="secret", db=os.path.join(tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.db.add_kid("noam", "1234", "נועם")
+        self.tg = FakeTelegram()
+        self.hg = hs.HomeGuard(cfg, self.db, self.tg)
+        self.hg.state("tablet", "android", 9)
+        self.srv = ThreadingHTTPServer(("127.0.0.1", self.port), hs.make_handler(self.hg))
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.token = None
+
+    def tearDown(self):
+        self.srv.shutdown()
+
+    def call(self, path, body=None, headers=None, token=True):
+        h = {"X-HG": "1", "Content-Type": "application/json"} if body is not None else {}
+        if token and self.token:
+            h["Authorization"] = "Bearer " + self.token
+        h.update(headers or {})
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
+                                     data=json.dumps(body).encode() if body is not None else None, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read()), r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}"), e.headers
+
+    def sign_in(self):
+        self.hg.handle_command(1, "/webpass", "correct-horse")
+        status, res, headers = self.call("/admin/api/login", {"password": "correct-horse"})
+        self.assertTrue(res["ok"])
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.token = res["token"]
+
+    def act(self, **body):
+        return self.call("/admin/api/action", dict(body))[1]
+
+    def test_page_and_login_flow(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/admin", timeout=5) as r:
+            self.assertIn("HomeGuard", r.read().decode())
+            self.assertEqual(r.headers["X-Frame-Options"], "DENY")
+        self.assertEqual(self.call("/admin/api/state")[0], 401)
+        self.assertIn("/webpass", self.call("/admin/api/login", {"password": "x"})[1]["error"])
+        self.sign_in()
+        self.assertIn("כניסה לממשק", self.tg.sent()[-1]["text"])
+        st = self.call("/admin/api/state")[1]
+        self.assertEqual(st["devices"][0]["name"], "tablet")
+        # The agent token is not a web token, and a web token is not an agent token.
+        self.assertEqual(self.call("/admin/api/state", headers={"Authorization": "Bearer secret"}, token=False)[0], 401)
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/state?pc=x",
+                                     headers={"X-Agent-Token": self.token})
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(req, timeout=5)
+
+    def test_post_needs_csrf_header(self):
+        self.sign_in()
+        self.assertEqual(self.call("/admin/api/action", {"action": "lock", "pc": "*"}, headers={"X-HG": "0"})[0], 403)
+
+    def test_wrong_passwords_lock_and_alert(self):
+        self.hg.web.set_password("correct-horse")
+        for _ in range(5):
+            self.assertFalse(self.call("/admin/api/login", {"password": "nope"})[1]["ok"])
+        self.assertIn("ניסיונות", self.tg.sent()[-1]["text"])
+        self.assertIn("10 דקות", self.call("/admin/api/login", {"password": "correct-horse"})[1]["error"])
+
+    def test_grant_extend_lock(self):
+        self.sign_in()
+        res = self.act(action="grant", pc="tablet", username="noam", mode="offline", minutes="2 שעות")
+        self.assertTrue(res["ok"], res)
+        s = self.hg.state("tablet")["session"]
+        self.assertEqual(s["mode"], "offline")
+        self.assertGreater(s["remaining"], 119 * 60)
+        self.assertTrue(self.act(action="extend", pc="tablet", minutes="30")["ok"])
+        self.assertGreater(self.hg.state("tablet")["session"]["remaining"], 149 * 60)
+        self.assertIn("tablet", self.act(action="lock", pc="*")["message"])
+        self.assertIsNone(self.hg.state("tablet")["session"])
+
+    def test_decide_requests_from_the_page(self):
+        self.sign_in()
+        rid = self.hg.login("tablet", "noam", "")["request_id"]
+        pending = self.call("/admin/api/state")[1]["pending"]
+        self.assertEqual(pending[0]["id"], rid)
+        self.assertFalse(self.act(action="decide", id=rid, mode="full", minutes="30")["ok"])  # full not offered
+        self.assertEqual(self.act(action="decide", id=rid, mode="allowlist", minutes="45")["message"], "אושר")
+        self.assertIn("ממשק אינטרנט", self.tg.sent("editMessageText")[-1]["text"])
+        self.hg.request_site("tablet", "khanacademy.org")
+        sid = self.db.q("SELECT id FROM requests WHERE kind='site'")[0]["id"]
+        self.act(action="decide", id=sid, choice="session")
+        self.assertIn("khanacademy.org", self.hg.state("tablet")["allowlist"])
+
+    def test_sites_apps_kids_settings(self):
+        self.sign_in()
+        self.act(action="site_add", list="always", domain="https://www.oritre.github.io/x, hf.co")
+        self.assertEqual(self.hg.state("t")["alwayslist"], ["hf.co", "oritre.github.io"])
+        self.assertFalse(self.act(action="site_add", list="allow", domain="a.com", minutes="soon")["ok"])
+        self.act(action="site_remove", list="always", domain="hf.co")
+        self.assertEqual(self.hg.state("t")["alwayslist"], ["oritre.github.io"])
+        self.hg.report_apps("tablet", [{"pkg": "com.android.chrome", "label": "Chrome"}])
+        app_id = self.call("/admin/api/state")[1]["apps"][0]["id"]
+        self.act(action="app_rule", id=app_id, rule="nonet")
+        self.assertEqual(self.hg.state("tablet")["apps_nonet"], ["com.android.chrome"])
+        self.assertIn("סיסמה זמנית", self.act(action="kid_add", username="maya", display="מאיה")["message"])
+        self.assertFalse(self.act(action="kid_add", username="maya")["ok"])
+        self.act(action="kid_disable", username="maya")
+        self.assertTrue(self.db.kid("maya")["disabled"])
+        self.act(action="setting", key="fullnet", value=True)
+        self.assertTrue(self.hg.full_internet_allowed())
+
+    def test_tokens_and_password_change(self):
+        self.sign_in()
+        new = self.act(action="token_new", label="Claude")["token"]
+        tokens = self.call("/admin/api/tokens")[1]["tokens"]
+        self.assertEqual(len(tokens), 2)
+        res = self.act(action="web_password", old="correct-horse", new="battery-staple")
+        self.assertTrue(res["relogin"])
+        self.token = new
+        self.assertEqual(self.call("/admin/api/state")[0], 401)  # every session and token is gone
+
+
 if __name__ == "__main__":
     unittest.main()

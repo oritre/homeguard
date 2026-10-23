@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
     "durations": [30, 60, 120],
     "extend_options": [15, 30, 60],
     "max_failed_logins": 5,
+    "public_url": "",  # e.g. the Tailscale Funnel address, shown by /web
 }
 
 
@@ -169,6 +170,10 @@ class DB:
                     label TEXT NOT NULL, rule TEXT NOT NULL DEFAULT 'ok', first_seen REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS device_apps (
                     pc TEXT NOT NULL, pkg TEXT NOT NULL, PRIMARY KEY (pc, pkg));
+                CREATE TABLE IF NOT EXISTS web_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT NOT NULL UNIQUE,
+                    label TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL,
+                    last_used REAL, ip TEXT);
                 """
             )
             for table, col, decl in (("kids", "pw_plain", "TEXT"),
@@ -323,6 +328,7 @@ class HomeGuard:
         self.tg = tg
         self.parents = [int(c) for c in cfg["parent_chat_ids"]]
         self.awaiting_time: dict[int, str] = {}
+        self.web = WebAdmin(self)
 
     # ---- messaging helpers
     def notify(self, text: str, keyboard=None) -> list[list[int]]:
@@ -984,6 +990,15 @@ class HomeGuard:
                 self.lock_kid(user)
                 self.db.x("DELETE FROM kids WHERE username=?", (user,))
                 self.reply(chat, f"🗑 {user} הוסר")
+        elif cmd == "/webpass":
+            if len(arg) < 8:
+                self.reply(chat, "שימוש: /webpass <סיסמה של 8 תווים לפחות>\nזו הסיסמה לממשק הניהול באינטרנט (/web).")
+                return
+            self.web.set_password(arg)
+            self.reply(chat, "🔑 הסיסמה לממשק הניהול נקבעה. כל הכניסות הקודמות נותקו.\n"
+                             "כדאי למחוק מהצ'אט את ההודעה עם הסיסמה.\n\n" + self.web.link_text())
+        elif cmd == "/web":
+            self.reply(chat, self.web.link_text())
         else:
             self.reply(chat, HELP)
 
@@ -1014,6 +1029,302 @@ class HomeGuard:
         return "\n".join(lines) or "אין חשבונות מוגדרים"
 
 
+# -------------------------------------------------------------------- web admin
+
+class WebAdmin:
+    """The parents' web page (/admin): everything the bot can do, with explanations.
+
+    Behind a password the parents set with /webpass (stored hashed). Signing in gives a random
+    token (cookie for the page, or "Authorization: Bearer" for scripts); only its hash is stored.
+    Every web sign-in is reported in Telegram, and too many wrong passwords lock the page for a while."""
+
+    WHO = "ממשק אינטרנט"
+    SESSION_DAYS = 30
+    TOKEN_DAYS = 365
+
+    def __init__(self, hg: HomeGuard):
+        self.hg = hg
+        self.db = hg.db
+
+    # ---- password and tokens
+    def password_set(self) -> bool:
+        return bool(self.db.setting("web_pw_hash"))
+
+    def set_password(self, password: str) -> None:
+        salt = secrets.token_hex(16)
+        self.db.set_setting("web_pw_salt", salt)
+        self.db.set_setting("web_pw_hash", DB._hash(password, salt))
+        self.db.x("DELETE FROM web_sessions")
+
+    def check_password(self, password: str) -> bool:
+        stored = self.db.setting("web_pw_hash")
+        return bool(stored) and hmac.compare_digest(stored, DB._hash(password, self.db.setting("web_pw_salt")))
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def new_token(self, label: str, days: int, ip: str = "") -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        self.db.x("INSERT INTO web_sessions (token_hash, label, created, expires, last_used, ip) VALUES (?,?,?,?,?,?)",
+                  (self._token_hash(token), label[:80], now, now + days * 86400, now, ip[:64]))
+        return token
+
+    def session(self, token: str):
+        if not token:
+            return None
+        rows = self.db.q("SELECT * FROM web_sessions WHERE token_hash=? AND expires>?",
+                         (self._token_hash(token), time.time()))
+        if not rows:
+            return None
+        if time.time() - (rows[0]["last_used"] or 0) > 60:
+            self.db.x("UPDATE web_sessions SET last_used=? WHERE id=?", (time.time(), rows[0]["id"]))
+        return rows[0]
+
+    def logout(self, token: str) -> None:
+        self.db.x("DELETE FROM web_sessions WHERE token_hash=?", (self._token_hash(token),))
+
+    def login(self, password: str, ip: str, agent: str) -> dict:
+        now = time.time()
+        limit = self.hg.cfg["max_failed_logins"]
+        recent = self.db.q("SELECT COUNT(*) c FROM failed_logins WHERE pc='web' AND ts>?", (now - 600,))[0]["c"]
+        if not self.password_set():
+            return {"ok": False, "error": "עוד לא נקבעה סיסמה. שלחו לבוט: /webpass <סיסמה>"}
+        if recent >= limit:
+            return {"ok": False, "error": "יותר מדי ניסיונות. נסו שוב בעוד 10 דקות."}
+        if not self.check_password(password):
+            self.db.x("INSERT INTO failed_logins VALUES ('web',?)", (now,))
+            if recent + 1 == limit:
+                self.hg.notify(f"⚠️ {limit} ניסיונות כניסה שגויים לממשק הניהול (אחרון מ-{ip}). "
+                               "הממשק חסום ל-10 דקות.")
+            return {"ok": False, "error": "סיסמה שגויה"}
+        device = " ".join(agent.split())[:80]
+        token = self.new_token(f"דפדפן · {device}" if device else "דפדפן", self.SESSION_DAYS, ip)
+        self.hg.notify(f"🖥 כניסה לממשק הניהול ({hhmm(now)}, {ip})")
+        return {"ok": True, "token": token}
+
+    def link_text(self) -> str:
+        base = str(self.hg.cfg.get("public_url") or "").rstrip("/")
+        lines = ["🖥 ממשק הניהול:"]
+        if base:
+            lines.append(f"{base}/admin")
+        lines.append(f"בבית: http://<כתובת השרת>:{self.hg.cfg['port']}/admin")
+        if not self.password_set():
+            lines.append("\nעוד לא נקבעה סיסמה: /webpass <סיסמה>")
+        return "\n".join(lines)
+
+    # ---- what the page shows
+    def snapshot(self) -> dict:
+        now = time.time()
+        devices = []
+        for p in self.db.q("SELECT * FROM pcs ORDER BY name"):
+            s = self.db.active_session(p["name"])
+            session = None
+            if s and s["ends"] > now:
+                session = {"kid": s["kid"], "display": self.db.kid_display(s["kid"]), "mode": s["mode"],
+                           "mode_name": MODES[s["mode"]], "started": s["started"],
+                           "ends": None if s["ends"] >= FOREVER else s["ends"]}
+            devices.append({"name": p["name"], "online": bool(p["last_seen"] and now - p["last_seen"] < 90),
+                            "last_seen": p["last_seen"], "user": p["win_user"] or "", "version": p["version"],
+                            "android": bool(self.db.q("SELECT 1 FROM device_apps WHERE pc=? LIMIT 1", (p["name"],))),
+                            "session": session})
+        pending = []
+        for r in self.db.q("SELECT * FROM requests WHERE status='pending' ORDER BY created DESC"):
+            s = self.db.q("SELECT * FROM sessions WHERE id=?", (r["session_id"],)) if r["session_id"] else []
+            pending.append({"id": r["id"], "kind": r["kind"], "pc": r["pc"], "kid": r["kid"],
+                            "display": self.db.kid_display(r["kid"]), "created": r["created"],
+                            "detail": r["detail"] or "",
+                            "session_ends": (None if s[0]["ends"] >= FOREVER else s[0]["ends"]) if s else None,
+                            "session_mode": s[0]["mode"] if s else None})
+        kids = [{"username": k["username"], "display": k["display"], "role": k["role"],
+                 "must_set": bool(k["must_set"]), "disabled": bool(k["disabled"]), "password": k["pw_plain"]}
+                for k in self.db.q("SELECT * FROM kids ORDER BY role DESC, display")]
+        sites = {lst: [{"domain": r["domain"], "expires": r["expires"], "session": bool(r["session_id"])}
+                       for r in self.db.site_rows(lst)] for lst in ("allow", "block", "always")}
+        apps = [{"id": a["id"], "pkg": a["pkg"], "label": a["label"], "rule": a["rule"],
+                 "devices": [d["pc"] for d in self.db.q("SELECT pc FROM device_apps WHERE pkg=?", (a["pkg"],))]}
+                for a in self.db.q("SELECT * FROM apps WHERE pkg IN (SELECT pkg FROM device_apps) ORDER BY label")]
+        return {"now": now, "devices": devices, "pending": pending, "kids": kids, "sites": sites, "apps": apps,
+                "settings": {"fullnet": self.hg.full_internet_allowed(), "passwords": self.hg.passwords_required(),
+                             "durations": list(self.hg.cfg["durations"]),
+                             "extend_options": list(self.hg.cfg["extend_options"]),
+                             "login_modes": list(self.hg.login_modes()), "update_seq": int(self.db.setting("update_seq", "0"))},
+                "modes": MODES, "app_rules": HomeGuard.APP_RULES}
+
+    def tokens(self, current_id: int) -> list:
+        return [{"id": t["id"], "label": t["label"], "created": t["created"], "expires": t["expires"],
+                 "last_used": t["last_used"], "ip": t["ip"] or "", "current": t["id"] == current_id}
+                for t in self.db.q("SELECT * FROM web_sessions WHERE expires>? ORDER BY last_used DESC", (time.time(),))]
+
+    def history(self, count: int) -> list:
+        rows = self.db.q("SELECT * FROM messages ORDER BY ts DESC LIMIT ?", (count * max(1, len(self.hg.parents)) * 3,))
+        events: dict = {}
+        for r in rows:
+            events.setdefault((int(r["ts"]) // 3, r["text"]), []).append(r)
+        out = []
+        for (_, text), copies in list(events.items())[:count]:
+            out.append({"ts": min(c["ts"] for c in copies), "text": text,
+                        "deleted": [{"by": self.hg.parent_name(c["chat"]), "at": c["deleted"]} for c in copies if c["deleted"]]})
+        return out
+
+    # ---- what the page can do
+    @staticmethod
+    def _minutes(value, allow_zero: bool = True) -> int | None:
+        """Minutes from a number or what a parent typed ("2 שעות", "18:30"). 0 = no time limit. None = not understood."""
+        text = str(value if value is not None else "").strip()
+        if text in ("0", "♾️", "ללא") and allow_zero:
+            return 0
+        m = int(text) if text.isdigit() else parse_duration(text)
+        return m if m and m > 0 else None
+
+    def action(self, body: dict, session_id: int) -> dict:
+        a = str(body.get("action", ""))
+        hg, db = self.hg, self.db
+        pc = str(body.get("pc", ""))
+        user = str(body.get("username", "")).strip().lower()
+
+        if a == "lock":
+            pcs = [p["name"] for p in db.q("SELECT name FROM pcs")] if pc == "*" else [pc]
+            locked = [p for p in pcs if hg.lock(p)]
+            return {"ok": True, "message": "🔒 ננעל: " + ", ".join(locked) if locked else "לא היה מכשיר פתוח"}
+        if a == "extend":
+            minutes = self._minutes(body.get("minutes"), allow_zero=False)
+            if not minutes:
+                return {"ok": False, "error": "לא הבנתי את הזמן. למשל: 30, 2 שעות, 18:30"}
+            if not hg.extend(pc, minutes):
+                return {"ok": False, "error": f"אין זמן פעיל ב-{pc}"}
+            return {"ok": True, "message": f"⏳ נוספו {fmt_min(minutes)} ל-{pc}"}
+        if a == "grant":
+            kid, mode = db.kid(user), str(body.get("mode", ""))
+            minutes = self._minutes(body.get("minutes"))
+            if not kid or not db.q("SELECT 1 FROM pcs WHERE name=?", (pc,)):
+                return {"ok": False, "error": "מכשיר או ילד לא קיימים"}
+            if mode not in ("allowlist", "full", "offline", "open") or minutes is None:
+                return {"ok": False, "error": "צריך לבחור סוג גישה וזמן"}
+            sid, ends = db.start_session(pc, kid["username"], mode, minutes)
+            for old in db.q("SELECT * FROM requests WHERE pc=? AND kind='login' AND status='pending'", (pc,)):
+                db.x("UPDATE requests SET status='approved', decided_by=?, session_id=? WHERE id=?", (self.WHO, sid, old["id"]))
+                hg.edit_all(json.loads(old["messages"]), f"✅ {kid['display']} ({pc}): טופל ב{self.WHO}")
+            length = "ללא הגבלת זמן" if minutes <= 0 else f"ל{fmt_min(minutes)}, עד {hhmm(ends)}"
+            hg.notify(f"✅ {kid['display']} ({pc}): {MODES[mode]} {length} · נפתח ב{self.WHO}")
+            return {"ok": True, "message": f"נפתח ל{kid['display']}: {MODES[mode]} {length}"}
+        if a == "decide":
+            rows = db.q("SELECT * FROM requests WHERE id=?", (int(body.get("id", 0) or 0),))
+            if not rows:
+                return {"ok": False, "error": "הבקשה לא נמצאה"}
+            r, choice = rows[0], str(body.get("choice", ""))
+            if choice == "deny":
+                data = f"dn:{r['id']}"
+            elif r["kind"] == "login":
+                minutes, mode = self._minutes(body.get("minutes")), str(body.get("mode", ""))
+                if minutes is None or mode not in hg.login_modes():
+                    return {"ok": False, "error": "צריך לבחור סוג גישה וזמן"}
+                data = f"ap:{r['id']}:{mode}:{minutes}"
+            elif r["kind"] == "site":
+                if choice == "session":
+                    data = f"st:{r['id']}:s"
+                else:
+                    minutes = self._minutes(body.get("minutes"))
+                    if minutes is None:
+                        return {"ok": False, "error": "לא הבנתי את הזמן"}
+                    data = f"st:{r['id']}:{minutes}"
+            else:
+                minutes = self._minutes(body.get("minutes"), allow_zero=False)
+                if not minutes:
+                    return {"ok": False, "error": "לא הבנתי את הזמן"}
+                data = f"ex:{r['id']}:{minutes}"
+            return {"ok": True, "message": hg.decide(data, self.WHO)}
+        if a in ("site_add", "site_remove"):
+            lst = str(body.get("list", ""))
+            if lst not in ("allow", "block", "always"):
+                return {"ok": False, "error": "רשימה לא מוכרת"}
+            domains = [normalize_domain(w) for w in str(body.get("domain", "")).replace(",", " ").split()]
+            domains = [d for d in domains if valid_domain(d) and not re.fullmatch(r"[\d.]+", d)]
+            if not domains:
+                return {"ok": False, "error": "כתובת אתר לא תקינה. למשל: wikipedia.org"}
+            minutes = None
+            if a == "site_add" and lst == "allow" and str(body.get("minutes", "")).strip() not in ("", "0"):
+                minutes = self._minutes(body.get("minutes"), allow_zero=False)
+                if not minutes:
+                    return {"ok": False, "error": "לא הבנתי את הזמן. למשל: 30, 2 שעות, 18:30"}
+            for d in domains:
+                db.add_site(d, lst, minutes) if a == "site_add" else db.remove_site(d, lst)
+            return {"ok": True, "message": ("נוסף: " if a == "site_add" else "הוסר: ") + ", ".join(domains)}
+        if a == "app_rule":
+            rule = str(body.get("rule", ""))
+            if rule not in HomeGuard.APP_RULES:
+                return {"ok": False, "error": "מצב לא מוכר"}
+            return {"ok": True, "message": hg.set_app_rule(int(body.get("id", 0) or 0), rule)}
+        if a == "kid_add":
+            if not re.fullmatch(r"[a-z0-9_.-]{2,32}", user):
+                return {"ok": False, "error": "שם משתמש באנגלית: אותיות, ספרות, נקודה או מקף (2 עד 32)"}
+            if db.kid(user):
+                return {"ok": False, "error": "כבר יש משתמש כזה"}
+            pw = temp_password()
+            role = "master" if body.get("master") else "kid"
+            db.add_kid(user, pw, str(body.get("display", "")).strip()[:40] or user, role, must_set=True)
+            return {"ok": True, "message": f"נוסף {user} עם סיסמה זמנית {pw}. בכניסה הראשונה תתבקש סיסמה אישית."}
+        if a.startswith("kid_"):
+            kid = db.kid(user)
+            if not kid:
+                return {"ok": False, "error": "אין משתמש כזה"}
+            if a == "kid_setpw":
+                pw = str(body.get("password", ""))
+                if not 4 <= len(pw) <= 32:
+                    return {"ok": False, "error": "סיסמה באורך 4 עד 32 תווים"}
+                db.set_password(user, pw)
+                return {"ok": True, "message": f"🔑 הסיסמה של {user} עודכנה"}
+            if a == "kid_resetpw":
+                pw = temp_password()
+                db.set_password(user, pw, must_set=True)
+                return {"ok": True, "message": f"🔑 סיסמה זמנית ל-{user}: {pw}"}
+            if a == "kid_disable":
+                db.x("UPDATE kids SET disabled=1 WHERE username=?", (user,))
+                locked = hg.lock_kid(user)
+                return {"ok": True, "message": f"⛔ {user} מושבת" + (f" (ננעל: {', '.join(locked)})" if locked else "")}
+            if a == "kid_enable":
+                db.x("UPDATE kids SET disabled=0 WHERE username=?", (user,))
+                return {"ok": True, "message": f"✅ {user} פעיל שוב"}
+            if a == "kid_lock":
+                locked = hg.lock_kid(user)
+                return {"ok": True, "message": "🔒 ננעל: " + ", ".join(locked) if locked else "הוא/היא לא מחובר/ת עכשיו"}
+            if a == "kid_remove":
+                hg.lock_kid(user)
+                db.x("DELETE FROM kids WHERE username=?", (user,))
+                return {"ok": True, "message": f"🗑 {user} הוסר"}
+        if a == "setting":
+            key = {"fullnet": "full_internet", "passwords": "require_password"}.get(str(body.get("key", "")))
+            if not key:
+                return {"ok": False, "error": "הגדרה לא מוכרת"}
+            db.set_setting(key, "1" if body.get("value") else "0")
+            return {"ok": True, "message": "נשמר"}
+        if a == "update":
+            hg.request_update()
+            return {"ok": True, "message": "📲 ביקשתי מהמכשירים לבדוק עדכון עכשיו"}
+        if a == "audit":
+            checked, gone = hg.audit()
+            return {"ok": True, "message": f"נבדקו {checked} הודעות" + (f", {len(gone)} נמחקו (נשלח דיווח בטלגרם)" if gone else ", כולן במקום")}
+        if a == "token_new":
+            label = " ".join(str(body.get("label", "")).split())[:60] or "טוקן גישה"
+            token = self.new_token(f"טוקן · {label}", self.TOKEN_DAYS)
+            hg.notify(f"🔑 נוצר טוקן גישה לממשק הניהול: {label}")
+            return {"ok": True, "token": token, "message": "הטוקן מוצג פעם אחת בלבד. שמרו אותו."}
+        if a == "token_revoke":
+            db.x("DELETE FROM web_sessions WHERE id=?", (int(body.get("id", 0) or 0),))
+            return {"ok": True, "message": "בוטל"}
+        if a == "web_password":
+            if not self.check_password(str(body.get("old", ""))):
+                return {"ok": False, "error": "הסיסמה הנוכחית שגויה"}
+            new = str(body.get("new", ""))
+            if len(new) < 8:
+                return {"ok": False, "error": "סיסמה של 8 תווים לפחות"}
+            self.set_password(new)
+            hg.notify("🔑 הסיסמה לממשק הניהול שונתה מהממשק. כל הכניסות נותקו.")
+            return {"ok": True, "message": "הסיסמה שונתה. צריך להתחבר מחדש.", "relogin": True}
+        return {"ok": False, "error": "פעולה לא מוכרת"}
+
+
 HELP = """🛡️ HomeGuard – פקודות:
 /status – מי מחובר ולכמה זמן
 /lock <מחשב> – לנעול עכשיו (בלי שם = כל המחשבים)
@@ -1032,6 +1343,10 @@ HELP = """🛡️ HomeGuard – פקודות:
 📱 אנדרואיד:
 /apps [שם] – האפליקציות במכשירים: ✅ מותרת · 📵 בלי אינטרנט · ⛔ חסומה. אפליקציה חדשה שמותקנת מגיעה לכאן עם כפתורים
 /update – לעדכן עכשיו את האפליקציה במכשירים (בלי כבל; הם בודקים לבד גם כל 6 שעות)
+
+🖥 ממשק אינטרנט:
+/web – הקישור לממשק הניהול (כל מה שיש כאן, עם הסברים)
+/webpass <סיסמה> – לקבוע סיסמה לממשק (8 תווים לפחות; מנתק את כל הכניסות הקודמות)
 
 📜 היסטוריה:
 /history [מספר] – האירועים האחרונים, גם אם ההודעות נמחקו מהצ'אט
@@ -1055,6 +1370,18 @@ HELP = """🛡️ HomeGuard – פקודות:
 
 # ------------------------------------------------------------------- HTTP API
 
+def _load_admin_html() -> str:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return "<!doctype html><meta charset=utf-8><p>admin.html חסר ליד homeguard_server.py</p>"
+
+
+ADMIN_HTML = _load_admin_html()
+
+
 def make_handler(hg: HomeGuard):
     token = hg.cfg["agent_token"]
 
@@ -1076,7 +1403,110 @@ def make_handler(hg: HomeGuard):
                 return False
             return True
 
+        # ---- parents' web page
+        def _ip(self) -> str:
+            fwd = self.headers.get("X-Forwarded-For", "")
+            return (fwd.split(",")[0].strip() if fwd else self.client_address[0])[:64]
+
+        def _admin_token(self) -> str:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                return auth[7:].strip()
+            for part in self.headers.get("Cookie", "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == "hg_admin":
+                    return v
+            return ""
+
+        def _admin_json(self, code: int, obj, cookie: str | None = None) -> None:
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            if cookie is not None:
+                secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "") == "https" else ""
+                age = WebAdmin.SESSION_DAYS * 86400 if cookie else 0
+                self.send_header("Set-Cookie", f"hg_admin={cookie}; Path=/admin; HttpOnly; SameSite=Strict; "
+                                               f"Max-Age={age}{secure}")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _admin_page(self) -> None:
+            body = ADMIN_HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _admin(self, method: str) -> None:
+            path = urlparse(self.path).path.rstrip("/")
+            if method == "GET" and path == "/admin":
+                self._admin_page()
+                return
+            if method == "POST":
+                # A custom header can't be sent cross-site without CORS, which we never allow (CSRF guard).
+                if self.headers.get("X-HG") != "1":
+                    self._admin_json(403, {"error": "forbidden"})
+                    return
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length > 65536:
+                    self._admin_json(413, {"error": "too large"})
+                    return
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                    if not isinstance(body, dict):
+                        raise ValueError
+                except ValueError:
+                    self._admin_json(400, {"error": "bad json"})
+                    return
+                if path == "/admin/api/login":
+                    res = hg.web.login(str(body.get("password", "")), self._ip(), self.headers.get("User-Agent", ""))
+                    self._admin_json(200, res, cookie=res.get("token") if res.get("ok") else None)
+                    return
+            tok = self._admin_token()
+            sess = hg.web.session(tok)
+            if path == "/admin/api/whoami":
+                self._admin_json(200, {"signed_in": bool(sess), "password_set": hg.web.password_set()})
+                return
+            if not sess:
+                self._admin_json(401, {"error": "צריך להתחבר"})
+                return
+            qs = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+            if method == "GET" and path == "/admin/api/state":
+                self._admin_json(200, hg.web.snapshot())
+            elif method == "GET" and path == "/admin/api/history":
+                count = int(qs["count"]) if qs.get("count", "").isdigit() else 50
+                self._admin_json(200, {"events": hg.web.history(max(1, min(count, 500)))})
+            elif method == "GET" and path == "/admin/api/tokens":
+                self._admin_json(200, {"tokens": hg.web.tokens(sess["id"])})
+            elif method == "POST" and path == "/admin/api/logout":
+                hg.web.logout(tok)
+                self._admin_json(200, {"ok": True}, cookie="")
+            elif method == "POST" and path == "/admin/api/action":
+                try:
+                    res = hg.web.action(body, sess["id"])
+                except (ValueError, TypeError) as e:
+                    res = {"ok": False, "error": f"נתונים לא תקינים ({e})"}
+                self._admin_json(200, res, cookie="" if res.get("relogin") else None)
+            else:
+                self._admin_json(404, {"error": "not found"})
+
         def do_GET(self):
+            if self.path == "/" or self.path.startswith("/admin"):
+                if self.path == "/":
+                    self.send_response(302)
+                    self.send_header("Location", "/admin")
+                    self.end_headers()
+                    return
+                self._admin("GET")
+                return
             if not self._auth():
                 return
             u = urlparse(self.path)
@@ -1092,6 +1522,9 @@ def make_handler(hg: HomeGuard):
                 self._send(404, {"error": "not found"})
 
         def do_POST(self):
+            if self.path.startswith("/admin"):
+                self._admin("POST")
+                return
             if not self._auth():
                 return
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -1153,6 +1586,7 @@ def run(cfg: dict) -> None:
         {"command": "kids", "description": "חשבונות וסיסמאות"},
         {"command": "addkid", "description": "הוספת ילד"},
         {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
+        {"command": "web", "description": "ממשק ניהול באינטרנט"},
         {"command": "history", "description": "היסטוריית אירועים"},
         {"command": "audit", "description": "בדיקה אם נמחקו הודעות"},
         {"command": "help", "description": "עזרה"},
