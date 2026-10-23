@@ -32,11 +32,15 @@ object Policy {
         return out
     }
 
+    /** Sites the parents keep open in every mode, with what they need to load. */
+    fun alwaysOpen(domain: String, always: List<String>): Boolean =
+        always.isNotEmpty() && matches(domain, expand(always))
+
     /** mode: open (master), full, allowlist, offline. always: sites the parents keep open in every mode. */
     fun allowed(domain: String, mode: String, allow: List<String>, block: List<String>,
                 always: List<String> = emptyList()): Boolean = when {
         mode == "open" -> true
-        always.isNotEmpty() && matches(domain, expand(always)) -> true
+        alwaysOpen(domain, always) -> true
         mode == "offline" -> matches(domain, ESSENTIAL)
         mode == "allowlist" -> !matches(domain, block) && matches(domain, expand(allow))
         else -> !matches(domain, block)

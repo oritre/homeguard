@@ -103,7 +103,9 @@ class FilterVpn : VpnService() {
                 val packet = buf.copyOf(n)
                 val q = Dns.udpQuery(packet) ?: continue // anything that isn't DNS is dropped
                 pool.execute {
-                    val answer = (if (fromNoNetApp(q)) Dns.nxdomain(q.payload) else resolve(q.payload))
+                    // A "no internet" app still reaches the always-open sites (web apps inside Chrome need them).
+                    val noNet = fromNoNetApp(q) && Dns.qname(q.payload)?.let { Policy.alwaysOpen(it, always) } != true
+                    val answer = (if (noNet) Dns.nxdomain(q.payload) else resolve(q.payload))
                         ?: return@execute
                     val reply = Dns.udpReply(q, answer)
                     synchronized(output) {

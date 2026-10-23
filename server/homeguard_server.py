@@ -648,7 +648,7 @@ class HomeGuard:
             kb.append(self.app_buttons(a))
         more = f"\n(מוצגות 24 מתוך {len(rows)}. לחיפוש: /apps <שם>)" if len(rows) > 24 else ""
         return ("📱 אפליקציות באנדרואיד. לוחצים על המצב הרצוי:\n"
-                "✅ מותרת · 📵 בלי אינטרנט (חוסם לפי שמות אתרים) · ⛔ חסומה (לא נפתחת בכלל)" + more), kb
+                "✅ מותרת · 📵 בלי אינטרנט (חוץ מאתרים שפתוחים תמיד) · ⛔ חסומה (לא נפתחת בכלל)" + more), kb
 
     def request_update(self) -> int:
         seq = int(self.db.setting("update_seq", "0")) + 1
