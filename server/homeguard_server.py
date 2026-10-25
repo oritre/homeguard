@@ -1006,8 +1006,41 @@ class HomeGuard:
                              "כדאי למחוק מהצ'אט את ההודעה עם הסיסמה.\n\n" + self.web.link_text())
         elif cmd == "/web":
             self.reply(chat, self.web.link_text())
+        elif cmd == "/learn":
+            self.reply(chat, self.learning_command(arg))
         else:
             self.reply(chat, HELP)
+
+    # ---- learning goals from the לימודים app (see learning_goals.py)
+    def learning(self):
+        code = self.db.setting("learn_code")
+        if not code:
+            return None
+        from learning_goals import LearningGoals
+        return LearningGoals(self, code, int(self.db.setting("learn_hour", "20")))
+
+    def learning_command(self, arg: str) -> str:
+        parts = arg.split()
+        if parts[:1] == ["code"] and len(parts) == 2:
+            code = re.sub(r"[^0-9A-Z]", "", parts[1].upper())
+            if len(code) != 8:
+                return "קוד המשפחה הוא 8 תווים (באפליקציה: הגדרות ← סנכרון)."
+            self.db.set_setting("learn_code", code)
+            return "📚 מחובר לאפליקציית הלימודים. סיכום כל ערב, והודעה כשילד משיג יעד. /learn לסיכום עכשיו."
+        if parts[:1] == ["hour"] and len(parts) == 2 and parts[1].isdigit() and 0 <= int(parts[1]) <= 23:
+            self.db.set_setting("learn_hour", parts[1])
+            return f"📚 הסיכום היומי יישלח בשעה {int(parts[1])}:00."
+        if parts[:1] == ["off"]:
+            self.db.set_setting("learn_code", "")
+            return "📚 הדיווח על הלמידה כובה."
+        lg = self.learning()
+        if not lg:
+            return "📚 עוד לא מחובר לאפליקציית הלימודים. שולחים: /learn code <קוד המשפחה>"
+        try:
+            return lg.summary_text(datetime.now().date().isoformat())
+        except Exception as e:  # network or Firestore
+            log.exception("learning summary failed")
+            return f"📚 לא הצלחתי לקרוא את נתוני הלמידה: {e}"
 
     def sites_text(self) -> str:
         allow = [r["domain"] + ("" if not r["expires"] else
@@ -1355,6 +1388,12 @@ HELP = """🛡️ HomeGuard – פקודות:
 /web – הקישור לממשק הניהול (כל מה שיש כאן, עם הסברים)
 /webpass <סיסמה> – לקבוע סיסמה לממשק (8 תווים לפחות; מנתק את כל הכניסות הקודמות)
 
+📚 לימודים (האפליקציה של הילדים):
+/learn – סיכום הלמידה של היום: זמן פעיל בכל לשונית, איכות ויעדים
+/learn code <קוד משפחה> – חיבור לאפליקציה (פעם אחת). אחר כך: הודעה כשילד משיג יעד, וסיכום כל ערב
+/learn hour 20 – באיזו שעה לשלוח את הסיכום · /learn off – לכבות
+את היעדים קובעים באפליקציה: אזור הורים ← פירוט ויעדים
+
 📜 היסטוריה:
 /history [מספר] – האירועים האחרונים, גם אם ההודעות נמחקו מהצ'אט
 /audit – בדיקת התאמה עכשיו: האם נמחקו הודעות של הבוט (נבדק גם אוטומטית כל חצי שעה)
@@ -1596,6 +1635,7 @@ def run(cfg: dict) -> None:
         {"command": "web", "description": "ממשק ניהול באינטרנט"},
         {"command": "history", "description": "היסטוריית אירועים"},
         {"command": "audit", "description": "בדיקה אם נמחקו הודעות"},
+        {"command": "learn", "description": "סיכום הלמידה של הילדים ויעדים"},
         {"command": "help", "description": "עזרה"},
     ])
 
@@ -1623,6 +1663,19 @@ def run(cfg: dict) -> None:
                 log.exception("audit failed")
 
     threading.Thread(target=auditor, daemon=True).start()
+
+    def learner():
+        """Every 15 minutes: learning goals met, and the evening summary."""
+        while True:
+            time.sleep(900)
+            try:
+                lg = hg.learning()
+                if lg:
+                    lg.tick()
+            except Exception:
+                log.exception("learning goals failed")
+
+    threading.Thread(target=learner, daemon=True).start()
 
     offset = 0
     log.info("Telegram bot polling")
