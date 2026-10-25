@@ -694,7 +694,7 @@ class AndroidAppsTest(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertIn("com.roblox.client", msgs[0]["text"])
         data = [b["callback_data"] for b in msgs[0]["reply_markup"]["inline_keyboard"][0]]
-        self.assertEqual([d.split(":")[2] for d in data], ["ok", "nonet", "blocked"])
+        self.assertEqual([d.split(":")[2] for d in data], ["blocked", "always", "ok"])
 
     def test_rules_reach_the_device_state(self):
         self.hg.report_apps("tablet", self.apps("com.whatsapp", "com.roblox.client"))
@@ -703,12 +703,12 @@ class AndroidAppsTest(unittest.TestCase):
                                                   "message": {"chat": {"id": 1}, "message_id": 5, "reply_markup": {
                                                       "inline_keyboard": [self.hg.app_buttons(
                                                           self.db.q("SELECT * FROM apps WHERE pkg='com.roblox.client'")[0])]}}}})
-        self.hg.set_app_rule(ids["com.whatsapp"], "nonet")
+        self.hg.set_app_rule(ids["com.whatsapp"], "always")
         st = self.hg.state("tablet", "android", 7)
         self.assertEqual(st["apps_blocked"], ["com.roblox.client"])
-        self.assertEqual(st["apps_nonet"], ["com.whatsapp"])
+        self.assertEqual(st["apps_always"], ["com.whatsapp"])
         edited = self.tg.sent("editMessageReplyMarkup")[-1]["reply_markup"]["inline_keyboard"][0]
-        self.assertTrue(edited[2]["text"].startswith("• "))
+        self.assertTrue(edited[0]["text"].startswith("• ⛔"))
         self.assertEqual(self.db.q("SELECT version FROM pcs WHERE name='tablet'")[0]["version"], 7)
 
     def test_update_command_bumps_sequence(self):
@@ -722,7 +722,7 @@ class AndroidAppsTest(unittest.TestCase):
         self.hg.handle_command(1, "/apps", "")
         kb = self.tg.sent()[-1]["reply_markup"]["inline_keyboard"]
         self.assertEqual(kb[0][0]["text"], "whatsapp")
-        self.assertTrue(kb[1][0]["text"].startswith("• ✅"))
+        self.assertTrue(kb[1][2]["text"].startswith("• 🌐"))
 
 
 class WebAdminTest(unittest.TestCase):
@@ -829,8 +829,8 @@ class WebAdminTest(unittest.TestCase):
         self.assertEqual(self.hg.state("t")["alwayslist"], ["oritre.github.io"])
         self.hg.report_apps("tablet", [{"pkg": "com.android.chrome", "label": "Chrome"}])
         app_id = self.call("/admin/api/state")[1]["apps"][0]["id"]
-        self.act(action="app_rule", id=app_id, rule="nonet")
-        self.assertEqual(self.hg.state("tablet")["apps_nonet"], ["com.android.chrome"])
+        self.act(action="app_rule", id=app_id, rule="always")
+        self.assertEqual(self.hg.state("tablet")["apps_always"], ["com.android.chrome"])
         self.assertIn("סיסמה זמנית", self.act(action="kid_add", username="maya", display="מאיה")["message"])
         self.assertFalse(self.act(action="kid_add", username="maya")["ok"])
         self.act(action="kid_disable", username="maya")

@@ -186,6 +186,8 @@ class DB:
                                      ("pcs", "version", "INTEGER")):
                 if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            # The old "no internet" app rule became "works even without internet".
+            self.conn.execute("UPDATE apps SET rule='always' WHERE rule='nonet'")
             self.conn.commit()
 
     def q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
@@ -594,12 +596,15 @@ class HomeGuard:
                 "alwayslist": self.db.sites("always"),
                 "blocklist": [d for d in self.db.sites("block") if d not in temp_allowed],
                 "apps_blocked": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='blocked'")],
-                "apps_nonet": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='nonet'")],
+                "apps_always": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='always'")],
+                "apps_nonet": [],  # rule retired; kept empty for app versions up to 8
                 "update_seq": int(self.db.setting("update_seq", "0")),
                 "server_time": now}
 
     # ---- apps on Android devices
-    APP_RULES = {"ok": "✅ מותרת", "nonet": "📵 בלי אינטרנט", "blocked": "⛔ חסומה"}
+    # blocked: never opens (only in a master session). always: opens in every mode and has its own
+    # internet. ok (the default): opens only while the kid has approved internet, under the site rules.
+    APP_RULES = {"blocked": "⛔ חסומה", "always": "🟢 גם בלי אינטרנט", "ok": "🌐 רק עם אינטרנט"}
 
     def report_apps(self, pc: str, apps: list) -> dict:
         """The device's launcher apps. A new app on a device we already know is announced with buttons."""
@@ -648,7 +653,9 @@ class HomeGuard:
             kb.append(self.app_buttons(a))
         more = f"\n(מוצגות 24 מתוך {len(rows)}. לחיפוש: /apps <שם>)" if len(rows) > 24 else ""
         return ("📱 אפליקציות באנדרואיד. לוחצים על המצב הרצוי:\n"
-                "✅ מותרת · 📵 בלי אינטרנט (חוץ מאתרים שפתוחים תמיד) · ⛔ חסומה (לא נפתחת בכלל)" + more), kb
+                "⛔ חסומה: לא נפתחת בכלל (רק בכניסת מאסטר)\n"
+                "🟢 גם בלי אינטרנט: נפתחת תמיד, ויש לה אינטרנט משלה גם כשהאינטרנט חסום (לא לדפדפן)\n"
+                "🌐 רק עם אינטרנט: נפתחת רק כשאישרתם אינטרנט, ולפי האתרים המאושרים" + more), kb
 
     def request_update(self) -> int:
         seq = int(self.db.setting("update_seq", "0")) + 1
@@ -1341,7 +1348,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 /sites – הרשימות
 
 📱 אנדרואיד:
-/apps [שם] – האפליקציות במכשירים: ✅ מותרת · 📵 בלי אינטרנט · ⛔ חסומה. אפליקציה חדשה שמותקנת מגיעה לכאן עם כפתורים
+/apps [שם] – האפליקציות במכשירים: ⛔ חסומה (רק מאסטר) · 🟢 גם בלי אינטרנט (יש לה אינטרנט משלה) · 🌐 רק עם אינטרנט (ברירת מחדל). אפליקציה חדשה שמותקנת מגיעה לכאן עם כפתורים
 /update – לעדכן עכשיו את האפליקציה במכשירים (בלי כבל; הם בודקים לבד גם כל 6 שעות)
 
 🖥 ממשק אינטרנט:

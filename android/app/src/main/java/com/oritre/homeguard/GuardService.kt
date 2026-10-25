@@ -78,7 +78,7 @@ class GuardService : Service() {
         }
         overlay = LockOverlay(this)
         // Lock right away (e.g. straight after a restart), before the server has even answered.
-        FilterVpn.noNetApps = prefs.noNetApps
+        FilterVpn.bypassApps = prefs.alwaysApps
         if (prefs.configured) {
             AdminReceiver.harden(this) // also after an update, so new protections take effect without a cable
             apply()
@@ -187,14 +187,17 @@ class GuardService : Service() {
         val shapeChanged = FilterVpn.always.isEmpty() != always.isEmpty()
         FilterVpn.always = always
         FilterVpn.upstream = prefs.upstreamDns.ifEmpty { "1.1.1.3" }
-        // Master ("open") sessions are exempt from per-app rules, like from site rules.
+        // Master ("open") sessions are exempt from per-app blocking, like from site rules.
         // Before the server first answers (e.g. right after a restart) the last known rules stay in place.
+        var appsChanged = false
         if (lastState != null) {
-            val exempt = mode == "open"
-            AppControl.apply(this, if (exempt) emptySet() else list("apps_blocked").toSet(),
-                if (exempt) emptySet() else list("apps_nonet").toSet())
+            appsChanged = AppControl.apply(this,
+                blocked = if (mode == "open") emptySet() else list("apps_blocked").toSet(),
+                always = list("apps_always").toSet(),
+                offline = s != null && mode == "offline",
+                alwaysSites = always.isNotEmpty())
         }
-        val changed = FilterVpn.mode != mode || shapeChanged
+        val changed = FilterVpn.mode != mode || shapeChanged || appsChanged
         FilterVpn.mode = mode
         ensureVpn(changed)
 

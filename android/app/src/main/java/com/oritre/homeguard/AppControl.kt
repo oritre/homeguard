@@ -11,7 +11,8 @@ import android.util.Log
 /**
  * Per-app rules from the parents (needs device owner for blocking):
  * - blocked apps are suspended: their icon turns grey and they won't open;
- * - "no internet" apps get "no such site" for every lookup in [FilterVpn].
+ * - "always" apps open in every mode and stay outside the [FilterVpn] tunnel (their own internet);
+ * - all other apps are suspended while the kid's session has no internet.
  * Also keeps HomeGuard as the home screen, so a restart or the home button always comes back to us.
  */
 object AppControl {
@@ -40,6 +41,12 @@ object AppControl {
         return ComponentName(pick.activityInfo.packageName, pick.activityInfo.name)
     }
 
+    private fun defaultBrowser(ctx: Context): String? {
+        val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://example.com"))
+        val pkg = ctx.packageManager.resolveActivity(i, 0)?.activityInfo?.packageName
+        return if (pkg == null || pkg == "android") "com.android.chrome" else pkg // "android" = chooser
+    }
+
     /** Packages we never suspend: ourselves, the system UI and the launchers. */
     private fun untouchable(ctx: Context): Set<String> {
         val pm = ctx.packageManager
@@ -48,16 +55,38 @@ object AppControl {
             setOf(ctx.packageName, "com.android.systemui")
     }
 
-    @Synchronized
-    fun apply(ctx: Context, blocked: Set<String>, noNet: Set<String>) {
-        val prefs = Prefs(ctx)
-        FilterVpn.noNetApps = noNet
-        if (prefs.noNetApps != noNet) prefs.noNetApps = noNet
+    private var launchableCache: Set<String> = emptySet()
+    private var launchableAt = -1_000_000L
 
-        if (!AdminReceiver.isOwner(ctx)) return
-        val want = blocked - untouchable(ctx)
+    /**
+     * blocked: never open. always: open in every mode and keep their own internet (outside the VPN).
+     * Every other app opens only while the kid has approved internet, so in a "no internet"
+     * session ([offline]) they are suspended too. Returns true when the always-set changed.
+     */
+    @Synchronized
+    fun apply(ctx: Context, blocked: Set<String>, always: Set<String>, offline: Boolean,
+              alwaysSites: Boolean = false): Boolean {
+        val prefs = Prefs(ctx)
+        val alwaysChanged = FilterVpn.bypassApps != always
+        FilterVpn.bypassApps = always
+        if (prefs.alwaysApps != always) prefs.alwaysApps = always
+
+        if (!AdminReceiver.isOwner(ctx)) return alwaysChanged
+        var wantAll = blocked
+        if (offline) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - launchableAt > 60_000) {
+                launchableCache = launchable(ctx).map { it.first }.toSet()
+                launchableAt = now
+            }
+            // With always-open sites, the browser stays usable for just those sites
+            // (web apps added to the home screen run inside it), still filtered by the VPN.
+            val browser = if (alwaysSites) defaultBrowser(ctx) else null
+            wantAll = wantAll + (launchableCache - always - setOfNotNull(browser))
+        }
+        val want = wantAll - untouchable(ctx)
         val had = prefs.suspendedApps
-        if (want == had) return
+        if (want == had) return alwaysChanged
         val admin = AdminReceiver.component(ctx)
         val dpm = dpm(ctx)
         try {
@@ -69,6 +98,7 @@ object AppControl {
         } catch (e: Exception) {
             Log.w(TAG, "suspend apps", e)
         }
+        return alwaysChanged
     }
 
     /** While locked, the notification shade can't be pulled down (device owner only). */

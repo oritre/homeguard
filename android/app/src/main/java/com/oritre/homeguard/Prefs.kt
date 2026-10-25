@@ -36,10 +36,10 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("suspended", emptySet())?.toSet() ?: emptySet()
         set(v) = sp.edit().putStringSet("suspended", v).apply()
 
-    /** Apps whose internet is blocked; kept so the rule holds after a restart, before the server answers. */
-    var noNetApps: Set<String>
-        get() = sp.getStringSet("nonet", emptySet())?.toSet() ?: emptySet()
-        set(v) = sp.edit().putStringSet("nonet", v).apply()
+    /** "Works even without internet" apps; kept so the rule holds after a restart, before the server answers. */
+    var alwaysApps: Set<String>
+        get() = sp.getStringSet("always_apps", emptySet())?.toSet() ?: emptySet()
+        set(v) = sp.edit().putStringSet("always_apps", v).apply()
 
     /** Last /update request from the bot that this device has handled. */
     var updateSeq: Int

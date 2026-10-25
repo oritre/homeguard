@@ -33,8 +33,8 @@ class FilterVpn : VpnService() {
         @Volatile var allow: List<String> = emptyList()
         @Volatile var block: List<String> = emptyList()
         @Volatile var always: List<String> = emptyList()
-        /** Packages whose internet the parents blocked (every lookup they make gets "no such site"). */
-        @Volatile var noNetApps: Set<String> = emptySet()
+        /** "Works even without internet" apps: left outside the tunnel, so they always have their own internet. */
+        @Volatile var bypassApps: Set<String> = emptySet()
         @Volatile var upstream = "1.1.1.3"
         @Volatile var running = false
         @Volatile var instance: FilterVpn? = null
@@ -57,7 +57,7 @@ class FilterVpn : VpnService() {
     @Synchronized
     fun applyMode() {
         val wantAll = mode == "offline" && always.isEmpty()
-        val shape = if (wantAll) "all" else "dns"
+        val shape = (if (wantAll) "all" else "dns") + "|" + bypassApps.sorted().joinToString(",")
         if (tun != null && tunnelMode == shape) return
         val b = Builder()
             .setSession("HomeGuard")
@@ -67,6 +67,9 @@ class FilterVpn : VpnService() {
         try {
             b.addDisallowedApplication(packageName) // our own app always reaches the server
         } catch (e: Exception) { Log.w(TAG, "disallow self", e) }
+        for (pkg in bypassApps) {
+            try { b.addDisallowedApplication(pkg) } catch (e: Exception) { Log.w(TAG, "bypass $pkg", e) }
+        }
         if (wantAll) {
             b.addRoute("0.0.0.0", 0)
             b.addAddress("fd11:1::1", 128)
@@ -103,10 +106,7 @@ class FilterVpn : VpnService() {
                 val packet = buf.copyOf(n)
                 val q = Dns.udpQuery(packet) ?: continue // anything that isn't DNS is dropped
                 pool.execute {
-                    // A "no internet" app still reaches the always-open sites (web apps inside Chrome need them).
-                    val noNet = fromNoNetApp(q) && Dns.qname(q.payload)?.let { Policy.alwaysOpen(it, always) } != true
-                    val answer = (if (noNet) Dns.nxdomain(q.payload) else resolve(q.payload))
-                        ?: return@execute
+                    val answer = resolve(q.payload) ?: return@execute
                     val reply = Dns.udpReply(q, answer)
                     synchronized(output) {
                         try { output.write(reply) } catch (_: Exception) {}
@@ -116,25 +116,6 @@ class FilterVpn : VpnService() {
         }
         reader = t
         t.start()
-    }
-
-    private val uidPackages = java.util.concurrent.ConcurrentHashMap<Int, List<String>>()
-
-    /** Which app sent this lookup (Android 10+), and is its internet blocked? */
-    private fun fromNoNetApp(q: Dns.Query): Boolean {
-        val blocked = noNetApps
-        if (blocked.isEmpty() || android.os.Build.VERSION.SDK_INT < 29) return false
-        return try {
-            val cm = getSystemService(android.net.ConnectivityManager::class.java)
-            val uid = cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_UDP,
-                java.net.InetSocketAddress(InetAddress.getByAddress(q.srcIp), q.srcPort),
-                java.net.InetSocketAddress(InetAddress.getByAddress(q.dstIp), q.dstPort))
-            if (uid < 0) return false
-            val pkgs = uidPackages.getOrPut(uid) { packageManager.getPackagesForUid(uid)?.toList() ?: emptyList() }
-            pkgs.any { it in blocked }
-        } catch (e: Exception) {
-            false
-        }
     }
 
     private fun resolve(query: ByteArray): ByteArray? {
