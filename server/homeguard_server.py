@@ -860,8 +860,8 @@ class HomeGuard:
             return "כבר טופל"
         self.awaiting_time[chat] = data
         if self.tg:
-            self.send(chat, "⏱ כמה זמן? כתבו מספר דקות (45), שעות (2 שעות / 1.5ש) או עד איזו שעה (18:30)",
-                      {"force_reply": True})
+            # No force_reply: Telegram keeps that "reply" box open in the chat every time it's opened.
+            self.send(chat, "⏱ כמה זמן? כתבו מספר דקות (45), שעות (2 שעות / 1.5ש) או עד איזו שעה (18:30)")
         return "כתבו את הזמן"
 
     def answer_custom_time(self, chat: int, text: str) -> None:
