@@ -69,6 +69,8 @@ class LockScreen:
         self.request_id = None
         self.remaining = 0
         self.warned = set()
+        self.fails = 0  # /state calls in a row that got no answer from the agent
+        self.lock_reason = ""  # why the last session ended, kept until the next unlock
 
         self.frame = tk.Frame(self.root, bg=BG)
         self.frame.place(relx=0.5, rely=0.5, anchor="center")
@@ -77,6 +79,7 @@ class LockScreen:
         self.subtitle = tk.Label(self.frame, text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם",
                                  font=(FONT, 14), fg="#aab3c5", bg=BG)
         self.subtitle.pack(pady=(0, 24))
+        self.reason = tk.Label(self.frame, text="", font=(FONT, 13, "bold"), fg="#ffd27a", bg=BG)
 
         # Optional note to the parents ("what do you want to do?"), sent with the login request.
         self.note_frame = tk.Frame(self.frame, bg=BG)
@@ -211,6 +214,11 @@ class LockScreen:
             self.site_dialog = None
         self.refresh_kids()
         self.title.config(text="🛡️ המחשב נעול")
+        self.reason.config(text=self.lock_reason)
+        if self.lock_reason:
+            self.reason.pack(after=self.subtitle, pady=(0, 16))
+        else:
+            self.reason.pack_forget()
         self.cancel_btn.pack_forget()
         self.pw_form.pack_forget()
         self.form.pack_forget()
@@ -291,6 +299,7 @@ class LockScreen:
     def show_unlocked(self, session: dict):
         self.state = "unlocked"
         self.warned = set()
+        self.lock_reason = ""
         self.root.withdraw()
         w = self.root.winfo_screenwidth()
         self.timer.deiconify()
@@ -381,15 +390,19 @@ class LockScreen:
 
     def done(self):
         call("POST", "/end", {})
+        self.end_session("התנתקת")
         self.show_locked("להתראות! 👋")
 
     # ------------------------------------------------------------------ poll
     def poll(self):
         st = call("GET", "/state")
+        self.fails = self.fails + 1 if st is None else 0
         if st is None:
-            # Agent not reachable: stay locked.
-            if self.state == "unlocked":
-                self.show_locked("אין חיבור לשומר המחשב")
+            # Agent not answering. A single miss happens when the PC is busy (a browser starting up),
+            # so only lock after about half a minute of silence. The agent's own watchdog is at 45s.
+            if self.state == "unlocked" and self.fails >= 3:
+                self.end_session("אין חיבור לשומר המחשב")
+                self.show_locked()
         elif st.get("exempt"):
             self.root.destroy()  # a parent is logged in
             return
@@ -398,7 +411,9 @@ class LockScreen:
             if session and self.state != "unlocked":
                 self.show_unlocked(session)
             elif not session and self.state == "unlocked":
-                self.show_locked("⏰ הזמן נגמר")
+                # Plenty of time was left a moment ago: a parent locked it, the timer didn't run out.
+                self.end_session("⏰ הזמן נגמר" if self.remaining <= 15 else "🔒 אבא/אמא נעלו את המחשב")
+                self.show_locked()
             elif self.state == "waiting" and self.request_id:
                 r = call("GET", f"/request?id={self.request_id}") or {}
                 if r.get("status") == "denied":
@@ -412,7 +427,11 @@ class LockScreen:
                 self.show_locked(self.message.cget("text"))  # pick up new kids / password setting
         self.root.after(2000, self.poll)
 
+    def end_session(self, why: str):
+        self.lock_reason = f"{why} ({time.strftime('%H:%M')})"
+
     def update_timer(self, session: dict, extend_pending: bool):
+        self.remaining = 10 ** 9 if session.get("unlimited") else session["remaining"]
         if session.get("unlimited"):
             self.more_btn.pack_forget()
             self.timer.configure(bg=BG)
