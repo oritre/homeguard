@@ -180,6 +180,10 @@ class Agent:
             return
         if now - self.last_heartbeat > self.cfg["lockscreen_timeout"]:
             log.warning("lock screen missing for %s, logging off", self.user)
+            if not self.session():  # nothing approved: someone got past the lock screen
+                self.server("POST", "/api/activity", {
+                    "pc": self.cfg["pc_name"],
+                    "what": f"מסך הנעילה נסגר בזמן ש-{self.user} מחובר/ת, אז ניתקתי את המשתמש"})
             winctl.logoff(self.session_id)
             self.user_since = now  # don't hammer while the logoff happens
 
@@ -234,7 +238,7 @@ def make_local_handler(agent: Agent):
                 self._send(agent.local_state())
             elif u.path == "/kids":
                 agent.last_heartbeat = time.time()
-                self._send(agent.server("GET", "/api/kids") or {"kids": [], "require_password": True})
+                self._send(agent.server("GET", "/api/kids") or {"kids": [], "require_password": True, "offline": True})
             elif u.path == "/request":
                 agent.last_heartbeat = time.time()
                 res = agent.server("GET", "/api/request", params={"id": qs.get("id", "0")})

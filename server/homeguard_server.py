@@ -330,6 +330,7 @@ class HomeGuard:
         self.tg = tg
         self.parents = [int(c) for c in cfg["parent_chat_ids"]]
         self.awaiting_time: dict[int, str] = {}
+        self.activity_sent: dict[str, float] = {}  # device -> last "used while locked" alert
         self.web = WebAdmin(self)
 
     # ---- messaging helpers
@@ -517,7 +518,12 @@ class HomeGuard:
         return ("allowlist", "full", "offline") if self.full_internet_allowed() else ("allowlist", "offline")
 
     def passwords_required(self) -> bool:
-        return self.db.setting("require_password", "0") == "1"
+        return not self.bot_only() and self.db.setting("require_password", "0") == "1"
+
+    def bot_only(self) -> bool:
+        """Default: kids get in only by a request the parents approve in the bot, never with a password.
+        The master account still signs in with its password."""
+        return self.db.setting("bot_only", "1") == "1"
 
     def kids_for_lock_screen(self) -> dict:
         kids = [{"username": k["username"], "display": k["display"]}
@@ -676,6 +682,26 @@ class HomeGuard:
         msgs = self.notify(f"⏳ {self.db.kid_display(s['kid'])} מבקש/ת עוד זמן במחשב '{pc}' (נשארו {left} דק')", kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True}
+
+    ACTIVITY_EVERY = 10 * 60  # at most one "used while locked" alert per device in this many seconds
+
+    def report_activity(self, pc: str, what: str) -> dict:
+        """The device says it's being used although it should be locked. Tell the parents."""
+        now = time.time()
+        s = self.db.active_session(pc)
+        if s and s["ends"] > now:
+            return {"ok": True, "sent": False}  # approved in the meantime
+        if now - self.activity_sent.get(pc, 0) < self.ACTIVITY_EVERY:
+            return {"ok": True, "sent": False}
+        self.activity_sent[pc] = now
+        text = f"⚠️ יש פעילות ב'{pc}' למרות שהוא אמור להיות נעול"
+        if what:
+            text += f"\n{what[:300]}"
+        last = self.db.q("SELECT kid, ends FROM sessions WHERE pc=? ORDER BY id DESC LIMIT 1", (pc,))
+        if last and last[0]["ends"] < FOREVER:
+            text += f"\nהזמן האחרון היה של {self.db.kid_display(last[0]['kid'])}, ונגמר ב-{hhmm(last[0]['ends'])}"
+        self.notify(text)
+        return {"ok": True, "sent": True}
 
     def end_by_kid(self, pc: str) -> None:
         s = self.db.active_session(pc)
@@ -961,6 +987,13 @@ class HomeGuard:
             self.reply(chat, "🔑 כניסה עם סיסמה: פעילה" if self.passwords_required() else
                        "👆 כניסה בלי סיסמה: הילד בוחר את השם שלו ואתם מאשרים. (מאסטר תמיד עם סיסמה)\n"
                        "לשינוי: /passwords on או /passwords off")
+        elif cmd == "/botonly":
+            if arg in ("on", "off"):
+                self.db.set_setting("bot_only", "1" if arg == "on" else "0")
+            self.reply(chat, "🤖 ילדים נכנסים רק בבקשה בבוט, בלי סיסמה. מאסטר נכנס עם שם משתמש וסיסמה."
+                       if self.bot_only() else
+                       "🔑 כניסת ילדים לפי /passwords\n"
+                       "לשינוי: /botonly on או /botonly off")
         elif cmd == "/kids":
             self.reply(chat, self.kids_text())
         elif cmd in ("/addkid", "/addmaster"):
@@ -1400,6 +1433,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 
 👧 חשבונות:
 /passwords on|off – כניסה עם סיסמה או רק בחירת שם (ברירת מחדל: בלי סיסמה)
+/botonly on|off – ילדים נכנסים רק בבקשה בבוט, בלי סיסמה (ברירת מחדל: on)
 ⏱ בכל בקשה יש "זמן אחר": כותבים 45, 2 שעות או 18:30
 /kids – כל החשבונות והסיסמאות
 /addkid <משתמש> [שם] – ילד חדש עם סיסמה זמנית (בוחר/ת סיסמה אישית בכניסה הראשונה)
@@ -1602,6 +1636,8 @@ def make_handler(hg: HomeGuard):
             elif path == "/api/apps":
                 apps = body.get("apps", [])
                 self._send(200, hg.report_apps(pc, apps if isinstance(apps, list) else []))
+            elif path == "/api/activity":
+                self._send(200, hg.report_activity(pc, str(body.get("what", ""))))
             elif path == "/api/notice":
                 hg.notify(str(body.get("text", ""))[:500] or f"הודעה מ-{pc}")
                 self._send(200, {"ok": True})

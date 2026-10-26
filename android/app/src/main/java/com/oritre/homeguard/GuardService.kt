@@ -150,6 +150,8 @@ class GuardService : Service() {
         }
         apply()
         reportApps()
+        val lockShown = (overlay?.visible == true && canDrawOverlay()) || SystemClock.elapsedRealtime() <= hiddenUntil
+        LockWatch.check(this, session() == null || vpnRevoked, lockShown)
     }
 
     /** Tell the server which apps are installed, so parents can block them from the bot. */
@@ -206,6 +208,9 @@ class GuardService : Service() {
             warned.clear()
             lastSessionId = sid
         }
+        val now = System.currentTimeMillis()
+        if (s != null) prefs.sessionEnds = now + s.optLong("remaining") * 1000
+        else if (prefs.sessionEnds > now) prefs.sessionEnds = now // locked early by a parent
         if (s != null) {
             val rem = s.optLong("remaining").toInt()
             val unlimited = s.optBoolean("unlimited")
