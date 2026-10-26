@@ -121,6 +121,10 @@ class SetupActivity : Activity() {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
             })
         }
+        val usageOk = LockWatch.usageAllowed(this)
+        box.addView(button((if (usageOk) "✅ " else "5. ") + "גישה לנתוני שימוש (לדעת אם משתמשים כשנעול)") {
+            try { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) } catch (_: Exception) {}
+        })
         box.addView(label(AdminReceiver.harden(this)))
 
         box.addView(button("💾 שמירה והפעלה") {

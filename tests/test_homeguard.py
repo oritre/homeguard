@@ -247,6 +247,23 @@ class ServerTest(unittest.TestCase):
         self.cmd("/allow youtube.com")
         self.assertEqual(self.db.sites("block"), [])
 
+    def test_activity_while_locked_alerts_parents_once(self):
+        res = self.hg.report_activity("tablet", "YouTube פתוח 3 דקות")
+        self.assertTrue(res["sent"])
+        msgs = self.tg.sent()
+        self.assertEqual([m["chat_id"] for m in msgs], [1, 2])
+        self.assertIn("אמור להיות נעול", msgs[0]["text"])
+        self.assertIn("YouTube", msgs[0]["text"])
+        self.assertFalse(self.hg.report_activity("tablet", "again")["sent"])  # throttled
+        self.assertTrue(self.hg.report_activity("salon", "")["sent"])  # other device
+
+    def test_activity_ignored_during_session(self):
+        rid = self.hg.login("tablet", "noam", "1234")["request_id"]
+        self.hg.decide(f"ap:{rid}:allowlist:30", "אורי")
+        n = len(self.tg.sent())
+        self.assertFalse(self.hg.report_activity("tablet", "x")["sent"])
+        self.assertEqual(len(self.tg.sent()), n)
+
     def test_kid_requests_site(self):
         self.assertFalse(self.hg.request_site("salon", "scratch.mit.edu")["ok"])  # no active session
         rid = self.hg.login("salon", "noam", "1234")["request_id"]

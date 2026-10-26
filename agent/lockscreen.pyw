@@ -93,6 +93,8 @@ class LockScreen:
         self.kids_frame = tk.Frame(self.frame, bg=BG)
         self.kid_names: list = []
         self.passwordless = False
+        self.kids_known = False  # got the kids list from the server at least once
+        self.offline = False
         self.master_link = tk.Button(self.frame, text="כניסת מאסטר", font=(FONT, 11, "underline"), bg=BG,
                                      fg="#aab3c5", activebackground=BG, relief="flat", bd=0, cursor="hand2",
                                      command=self.show_master_form)
@@ -191,8 +193,10 @@ class LockScreen:
     def refresh_kids(self) -> None:
         self.last_kids_refresh = time.time()
         res = call("GET", "/kids")
-        if not res:
-            return
+        self.offline = not res or bool(res.get("offline"))
+        if self.offline:
+            return  # keep what we knew; don't fall back to the password form just because the server is away
+        self.kids_known = True
         self.passwordless = not res.get("require_password", True)
         kids = [(k["username"], k["display"]) for k in res.get("kids", [])]
         if kids != self.kid_names:
@@ -225,7 +229,10 @@ class LockScreen:
         self.kids_frame.pack_forget()
         self.master_link.pack_forget()
         self.note_frame.pack(before=self.message)
-        if self.passwordless and self.kid_names:
+        if not self.kids_known and self.offline:
+            self.subtitle.config(text="אין חיבור לשרת של אבא ואמא. מנסים שוב כל כמה שניות...")
+            self.note_frame.pack_forget()
+        elif self.passwordless and self.kid_names:
             self.subtitle.config(text="מי נכנס? לחצו על השם שלכם, ואבא או אמא יאשרו בטלגרם")
             self.kids_frame.pack(before=self.message)
             self.master_link.pack(before=self.message, pady=(14, 0))
@@ -423,7 +430,7 @@ class LockScreen:
             if session and self.state == "unlocked":
                 self.update_timer(session, st.get("extend_pending"))
             elif (self.state == "locked" and not self.user_var.get()
-                  and time.time() - self.last_kids_refresh > 60):
+                  and time.time() - self.last_kids_refresh > (10 if self.offline else 60)):
                 self.show_locked(self.message.cget("text"))  # pick up new kids / password setting
         self.root.after(2000, self.poll)
 

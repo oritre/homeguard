@@ -50,6 +50,16 @@ class Prefs(context: Context) {
         get() = sp.getLong("update_check", 0)
         set(v) = sp.edit().putLong("update_check", v).apply()
 
+    /** Wall clock of the last poll, to notice when HomeGuard wasn't running ([LockWatch]). */
+    var lastAlive: Long
+        get() = sp.getLong("last_alive", 0)
+        set(v) = sp.edit().putLong("last_alive", v).apply()
+
+    /** Wall clock when the last approved time ends (or ended). */
+    var sessionEnds: Long
+        get() = sp.getLong("session_ends", 0)
+        set(v) = sp.edit().putLong("session_ends", v).apply()
+
     val configured: Boolean
         get() = token.isNotEmpty() && deviceName.isNotEmpty() && (homeUrl.isNotEmpty() || remoteUrl.isNotEmpty())
 }

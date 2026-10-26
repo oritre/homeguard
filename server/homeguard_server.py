@@ -330,6 +330,7 @@ class HomeGuard:
         self.tg = tg
         self.parents = [int(c) for c in cfg["parent_chat_ids"]]
         self.awaiting_time: dict[int, str] = {}
+        self.activity_sent: dict[str, float] = {}  # device -> last "used while locked" alert
         self.web = WebAdmin(self)
 
     # ---- messaging helpers
@@ -676,6 +677,26 @@ class HomeGuard:
         msgs = self.notify(f"⏳ {self.db.kid_display(s['kid'])} מבקש/ת עוד זמן במחשב '{pc}' (נשארו {left} דק')", kb)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return {"ok": True}
+
+    ACTIVITY_EVERY = 10 * 60  # at most one "used while locked" alert per device in this many seconds
+
+    def report_activity(self, pc: str, what: str) -> dict:
+        """The device says it's being used although it should be locked. Tell the parents."""
+        now = time.time()
+        s = self.db.active_session(pc)
+        if s and s["ends"] > now:
+            return {"ok": True, "sent": False}  # approved in the meantime
+        if now - self.activity_sent.get(pc, 0) < self.ACTIVITY_EVERY:
+            return {"ok": True, "sent": False}
+        self.activity_sent[pc] = now
+        text = f"⚠️ יש פעילות ב'{pc}' למרות שהוא אמור להיות נעול"
+        if what:
+            text += f"\n{what[:300]}"
+        last = self.db.q("SELECT kid, ends FROM sessions WHERE pc=? ORDER BY id DESC LIMIT 1", (pc,))
+        if last and last[0]["ends"] < FOREVER:
+            text += f"\nהזמן האחרון היה של {self.db.kid_display(last[0]['kid'])}, ונגמר ב-{hhmm(last[0]['ends'])}"
+        self.notify(text)
+        return {"ok": True, "sent": True}
 
     def end_by_kid(self, pc: str) -> None:
         s = self.db.active_session(pc)
@@ -1602,6 +1623,8 @@ def make_handler(hg: HomeGuard):
             elif path == "/api/apps":
                 apps = body.get("apps", [])
                 self._send(200, hg.report_apps(pc, apps if isinstance(apps, list) else []))
+            elif path == "/api/activity":
+                self._send(200, hg.report_activity(pc, str(body.get("what", ""))))
             elif path == "/api/notice":
                 hg.notify(str(body.get("text", ""))[:500] or f"הודעה מ-{pc}")
                 self._send(200, {"ok": True})

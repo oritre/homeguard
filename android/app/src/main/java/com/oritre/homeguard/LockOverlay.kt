@@ -23,6 +23,8 @@ class LockOverlay(private val svc: GuardService) {
     private val root = ScrollView(svc)
     private val box = LinearLayout(svc)
     private var shown = false
+    /** On the screen now (the system drops the window if the overlay permission is taken away). */
+    val visible get() = shown && root.isAttachedToWindow
 
     private enum class Screen { LOGIN, NOTE, MASTER, WAITING, NEW_PASSWORD, CHANGE_PASSWORD, PROTECTION_OFF }
     private var kids: List<Pair<String, String>> = emptyList()
@@ -56,7 +58,9 @@ class LockOverlay(private val svc: GuardService) {
         if (!svc.canDrawOverlay()) return
         if (svc.vpnRevoked && screen != Screen.PROTECTION_OFF) go(Screen.PROTECTION_OFF)
         if (!svc.vpnRevoked && screen == Screen.PROTECTION_OFF) go(Screen.LOGIN)
-        if (shown) return
+        if (shown && root.isAttachedToWindow) return
+        if (shown) { try { wm.removeView(root) } catch (_: Exception) {} }
+        shown = false
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
