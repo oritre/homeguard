@@ -93,6 +93,7 @@ class LockScreen:
         self.kids_frame = tk.Frame(self.frame, bg=BG)
         self.kid_names: list = []
         self.passwordless = False
+        self.master_ok = True
         self.kids_known = False  # got the kids list from the server at least once
         self.offline = False
         self.master_link = tk.Button(self.frame, text="כניסת מאסטר", font=(FONT, 11, "underline"), bg=BG,
@@ -198,6 +199,7 @@ class LockScreen:
             return  # keep what we knew; don't fall back to the password form just because the server is away
         self.kids_known = True
         self.passwordless = not res.get("require_password", True)
+        self.master_ok = res.get("master_login", True)
         kids = [(k["username"], k["display"]) for k in res.get("kids", [])]
         if kids != self.kid_names:
             self.kid_names = kids
@@ -235,7 +237,8 @@ class LockScreen:
         elif self.passwordless and self.kid_names:
             self.subtitle.config(text="מי נכנס? לחצו על השם שלכם, ואבא או אמא יאשרו בטלגרם")
             self.kids_frame.pack(before=self.message)
-            self.master_link.pack(before=self.message, pady=(14, 0))
+            if self.master_ok:
+                self.master_link.pack(before=self.message, pady=(14, 0))
         else:
             self.subtitle.config(text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם")
             self.form.pack(before=self.message)

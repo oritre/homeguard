@@ -68,6 +68,7 @@ class ServerTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], agent_token="t", db=os.path.join(self.tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.db.set_setting("require_password", "1")  # these tests cover the password flow
         self.db.add_kid("Noam", "1234", "נועם")
         self.tg = FakeTelegram()
@@ -247,6 +248,15 @@ class ServerTest(unittest.TestCase):
         self.cmd("/allow youtube.com")
         self.assertEqual(self.db.sites("block"), [])
 
+    def test_bot_only_refuses_master_and_ignores_passwords(self):
+        self.db.add_kid("mom", "9999", "אמא", role="master")
+        self.db.set_setting("bot_only", "1")
+        self.assertFalse(self.hg.login("salon", "mom", "9999")["ok"])
+        info = self.hg.kids_for_lock_screen()
+        self.assertFalse(info["require_password"])
+        self.assertFalse(info["master_login"])
+        self.assertTrue(self.hg.login("salon", "noam", "")["ok"])  # name only, parents approve
+
     def test_activity_while_locked_alerts_parents_once(self):
         res = self.hg.report_activity("tablet", "YouTube פתוח 3 דקות")
         self.assertTrue(res["sent"])
@@ -296,6 +306,7 @@ class SiteApprovalTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.db.add_kid("reei", "1111", "רעי")
         self.tg = FakeTelegram()
         self.hg = hs.HomeGuard(cfg, self.db, self.tg)
@@ -368,6 +379,7 @@ class PasswordlessTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], agent_token="t", db=os.path.join(tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.db.add_kid("evyatar", "1111", "אביתר", must_set=True)
         self.db.add_kid("hagit", "secret", "חגית", role="master")
         self.tg = FakeTelegram()
@@ -409,6 +421,7 @@ class CustomTimeTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.db.add_kid("reei", "1111", "רעי")
         self.hg = hs.HomeGuard(cfg, self.db, FakeTelegram())
 
@@ -450,6 +463,7 @@ class HistoryTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], db=os.path.join(tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.db.add_kid("reei", "x", "רעי")
         self.tg = FakeTelegram()
         self.tg.deleted = set()
@@ -577,6 +591,7 @@ class AgentEndToEnd(unittest.TestCase):
         sport = free_port()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="secret", db=os.path.join(tmp, "db"))
         db = hs.DB(cfg["db"])
+        db.set_setting("bot_only", "0")
         db.set_setting("require_password", "1")
         db.add_kid("noam", "1234", "נועם")
         db.add_site("wikipedia.org", "allow")
@@ -697,6 +712,7 @@ class AndroidAppsTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.tg = FakeTelegram()
         self.hg = hs.HomeGuard(cfg, self.db, self.tg)
 
@@ -750,6 +766,7 @@ class WebAdminTest(unittest.TestCase):
         self.port = free_port()
         cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="secret", db=os.path.join(tmp, "db"))
         self.db = hs.DB(cfg["db"])
+        self.db.set_setting("bot_only", "0")  # these tests also cover master/password sign-in
         self.db.add_kid("noam", "1234", "נועם")
         self.tg = FakeTelegram()
         self.hg = hs.HomeGuard(cfg, self.db, self.tg)

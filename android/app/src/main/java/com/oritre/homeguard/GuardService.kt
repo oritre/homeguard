@@ -139,7 +139,8 @@ class GuardService : Service() {
                     o.optString("username") to o.optString("display")
                 }
                 val passwordless = !k.optBoolean("require_password", true)
-                main.post { overlay?.setKids(list, passwordless) }
+                val master = k.optBoolean("master_login", true)
+                main.post { overlay?.setKids(list, passwordless, master) }
             }
         }
         val st = api.state(Updater.currentVersion(this))
