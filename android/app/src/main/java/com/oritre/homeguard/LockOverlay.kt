@@ -29,7 +29,6 @@ class LockOverlay(private val svc: GuardService) {
     private enum class Screen { LOGIN, NOTE, MASTER, WAITING, NEW_PASSWORD, CHANGE_PASSWORD, PROTECTION_OFF }
     private var kids: List<Pair<String, String>> = emptyList()
     private var passwordless = false
-    private var masterLogin = true
     private var screen = Screen.LOGIN
     private var requestId = 0
     private var user = ""
@@ -84,9 +83,8 @@ class LockOverlay(private val svc: GuardService) {
         if (screen == Screen.WAITING) go(Screen.LOGIN)
     }
 
-    fun setKids(list: List<Pair<String, String>>, noPasswords: Boolean, master: Boolean = true) {
-        if (list == kids && noPasswords == passwordless && master == masterLogin) return
-        masterLogin = master
+    fun setKids(list: List<Pair<String, String>>, noPasswords: Boolean) {
+        if (list == kids && noPasswords == passwordless) return
         kids = list
         passwordless = noPasswords
         if (screen == Screen.LOGIN) render()
@@ -170,7 +168,7 @@ class LockOverlay(private val svc: GuardService) {
             }, if (first) 32 else 12)
             first = false
         }
-        if (masterLogin) add(button("כניסת מאסטר", false) { go(Screen.MASTER) }, 32)
+        add(button("כניסת מאסטר", false) { go(Screen.MASTER) }, 32)
     }
 
     private fun noteField(): EditText = field("מה תרצו לעשות? (לא חובה)", false).apply {

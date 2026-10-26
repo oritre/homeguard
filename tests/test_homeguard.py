@@ -248,14 +248,13 @@ class ServerTest(unittest.TestCase):
         self.cmd("/allow youtube.com")
         self.assertEqual(self.db.sites("block"), [])
 
-    def test_bot_only_refuses_master_and_ignores_passwords(self):
+    def test_bot_only_kids_by_name_master_by_password(self):
         self.db.add_kid("mom", "9999", "אמא", role="master")
-        self.db.set_setting("bot_only", "1")
-        self.assertFalse(self.hg.login("salon", "mom", "9999")["ok"])
-        info = self.hg.kids_for_lock_screen()
-        self.assertFalse(info["require_password"])
-        self.assertFalse(info["master_login"])
+        self.db.set_setting("bot_only", "1")  # wins over require_password=1 from setUp
+        self.assertFalse(self.hg.kids_for_lock_screen()["require_password"])
         self.assertTrue(self.hg.login("salon", "noam", "")["ok"])  # name only, parents approve
+        self.assertFalse(self.hg.login("salon", "mom", "")["ok"])
+        self.assertTrue(self.hg.login("salon", "mom", "9999")["approved"])
 
     def test_activity_while_locked_alerts_parents_once(self):
         res = self.hg.report_activity("tablet", "YouTube פתוח 3 דקות")

@@ -93,7 +93,6 @@ class LockScreen:
         self.kids_frame = tk.Frame(self.frame, bg=BG)
         self.kid_names: list = []
         self.passwordless = False
-        self.master_ok = True
         self.kids_known = False  # got the kids list from the server at least once
         self.offline = False
         self.master_link = tk.Button(self.frame, text="כניסת מאסטר", font=(FONT, 11, "underline"), bg=BG,
@@ -140,6 +139,9 @@ class LockScreen:
                   command=lambda: self.show_locked()).pack(side="right", padx=4, ipady=4)
         self.login_after_pw = False
 
+        # Back from the master form to the kids' name buttons.
+        self.back_btn = tk.Button(self.frame, text="חזרה", font=(FONT, 13), bg="#39445a", fg=FG,
+                                  relief="flat", width=12, command=self.back_to_request)
         self.cancel_btn = tk.Button(self.frame, text="ביטול", font=(FONT, 13), bg="#39445a", fg=FG,
                                     relief="flat", width=12, command=self.cancel)
         self.message = tk.Label(self.frame, text="", font=(FONT, 13), fg="#ffb4a8", bg=BG)
@@ -199,7 +201,6 @@ class LockScreen:
             return  # keep what we knew; don't fall back to the password form just because the server is away
         self.kids_known = True
         self.passwordless = not res.get("require_password", True)
-        self.master_ok = res.get("master_login", True)
         kids = [(k["username"], k["display"]) for k in res.get("kids", [])]
         if kids != self.kid_names:
             self.kid_names = kids
@@ -226,6 +227,7 @@ class LockScreen:
         else:
             self.reason.pack_forget()
         self.cancel_btn.pack_forget()
+        self.back_btn.pack_forget()
         self.pw_form.pack_forget()
         self.form.pack_forget()
         self.kids_frame.pack_forget()
@@ -237,8 +239,7 @@ class LockScreen:
         elif self.passwordless and self.kid_names:
             self.subtitle.config(text="מי נכנס? לחצו על השם שלכם, ואבא או אמא יאשרו בטלגרם")
             self.kids_frame.pack(before=self.message)
-            if self.master_ok:
-                self.master_link.pack(before=self.message, pady=(14, 0))
+            self.master_link.pack(before=self.message, pady=(14, 0))
         else:
             self.subtitle.config(text="הכניסו שם משתמש וסיסמה, ואבא או אמא יאשרו בטלגרם")
             self.form.pack(before=self.message)
@@ -254,8 +255,15 @@ class LockScreen:
         self.master_link.pack_forget()
         self.title.config(text="כניסת מאסטר")
         self.subtitle.config(text="שם משתמש וסיסמה של חשבון המאסטר")
+        self.message.config(text="")
         self.form.pack(before=self.message)
+        self.back_btn.pack(before=self.message, pady=(10, 0))
         self.user_entry.focus_set()
+
+    def back_to_request(self):
+        self.user_var.set("")
+        self.pass_var.set("")
+        self.show_locked()
 
     def show_set_password(self, user: str = "", old: str = "", display: str = ""):
         """display set = first login with a temporary password: log in right after saving."""
@@ -263,6 +271,7 @@ class LockScreen:
         self.login_after_pw = bool(display)
         self.note_frame.pack_forget()
         self.form.pack_forget()
+        self.back_btn.pack_forget()
         self.title.config(text=f"שלום {display} 👋" if display else "שינוי סיסמה")
         self.subtitle.config(text="בחרו סיסמה אישית שרק אתם תדעו" if display else
                              "הכניסו את הסיסמה הנוכחית ובחרו סיסמה חדשה")
@@ -299,6 +308,7 @@ class LockScreen:
         self.state = "waiting"
         self.note_frame.pack_forget()
         self.form.pack_forget()
+        self.back_btn.pack_forget()
         self.kids_frame.pack_forget()
         self.master_link.pack_forget()
         self.title.config(text=f"שלום {display} 👋")

@@ -464,8 +464,6 @@ class HomeGuard:
             return {"ok": False, "error": "החשבון מושבת. דברו עם אבא/אמא."}
         if kid["must_set"] and self.passwords_required():
             return {"ok": False, "need_new_password": True, "display": kid["display"]}
-        if kid["role"] == "master" and self.bot_only():
-            return {"ok": False, "error": "כרגע נכנסים רק בבקשה לאבא/אמא בבוט"}
         if kid["role"] == "master":
             self.db.start_session(pc, name, "open", 0)
             rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, status, decided_by) "
@@ -523,14 +521,15 @@ class HomeGuard:
         return not self.bot_only() and self.db.setting("require_password", "0") == "1"
 
     def bot_only(self) -> bool:
-        """Default: the only way in is a request the parents approve in the bot (no master sign-in)."""
+        """Default: kids get in only by a request the parents approve in the bot, never with a password.
+        The master account still signs in with its password."""
         return self.db.setting("bot_only", "1") == "1"
 
     def kids_for_lock_screen(self) -> dict:
         kids = [{"username": k["username"], "display": k["display"]}
                 for k in self.db.q("SELECT username, display FROM kids WHERE role!='master' AND disabled=0 "
                                    "ORDER BY display")]
-        return {"kids": kids, "require_password": self.passwords_required(), "master_login": not self.bot_only()}
+        return {"kids": kids, "require_password": self.passwords_required()}
 
     def request_status(self, rid: int) -> dict:
         rows = self.db.q("SELECT * FROM requests WHERE id=?", (rid,))
@@ -991,9 +990,9 @@ class HomeGuard:
         elif cmd == "/botonly":
             if arg in ("on", "off"):
                 self.db.set_setting("bot_only", "1" if arg == "on" else "0")
-            self.reply(chat, "🤖 כניסה רק בבקשה בבוט: הילד בוחר את השם שלו ואתם מאשרים. אין כניסת מאסטר או סיסמה."
+            self.reply(chat, "🤖 ילדים נכנסים רק בבקשה בבוט, בלי סיסמה. מאסטר נכנס עם שם משתמש וסיסמה."
                        if self.bot_only() else
-                       "🔑 אפשר גם כניסת מאסטר עם סיסמה (ו-/passwords לפי ההגדרה)\n"
+                       "🔑 כניסת ילדים לפי /passwords\n"
                        "לשינוי: /botonly on או /botonly off")
         elif cmd == "/kids":
             self.reply(chat, self.kids_text())
@@ -1434,7 +1433,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 
 👧 חשבונות:
 /passwords on|off – כניסה עם סיסמה או רק בחירת שם (ברירת מחדל: בלי סיסמה)
-/botonly on|off – כניסה רק בבקשה בבוט, בלי מאסטר וסיסמאות (ברירת מחדל: on)
+/botonly on|off – ילדים נכנסים רק בבקשה בבוט, בלי סיסמה (ברירת מחדל: on)
 ⏱ בכל בקשה יש "זמן אחר": כותבים 45, 2 שעות או 18:30
 /kids – כל החשבונות והסיסמאות
 /addkid <משתמש> [שם] – ילד חדש עם סיסמה זמנית (בוחר/ת סיסמה אישית בכניסה הראשונה)
