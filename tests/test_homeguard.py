@@ -275,6 +275,19 @@ class ServerTest(unittest.TestCase):
         self.hg.login("room", "mom", "9999")
         self.assertEqual([m["chat_id"] for m in self.tg.sent()], [2])
 
+    def test_commands_and_menu_only_for_main_parent(self):
+        self.hg.handle_command(1, "/owner", "")
+        self.tg.calls.clear()
+        self.hg.handle_command(2, "/status", "")
+        self.assertEqual(self.tg.sent(), [])  # the other parent gets nothing
+        self.hg.handle_command(1, "/status", "")
+        self.assertEqual([m["chat_id"] for m in self.tg.sent()], [1])
+        self.hg.set_menus()
+        menus = {p.get("scope", {}).get("chat_id"): p["commands"] for m, p in self.tg.calls if m == "setMyCommands"}
+        self.assertEqual(menus[None], [])
+        self.assertEqual(menus[2], [])
+        self.assertTrue(menus[1])
+
     def test_activity_while_locked_alerts_parents_once(self):
         res = self.hg.report_activity("tablet", "YouTube פתוח 3 דקות")
         self.assertTrue(res["sent"])

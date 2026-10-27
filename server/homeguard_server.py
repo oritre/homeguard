@@ -321,6 +321,28 @@ class Telegram:
         return body["result"]
 
 
+# The bot's command menu, shown only in the main parent's chat.
+MENU = [
+    {"command": "status", "description": "מצב המחשבים"},
+    {"command": "lock", "description": "נעילת מחשב"},
+    {"command": "extend", "description": "הוספת זמן"},
+    {"command": "sites", "description": "רשימות אתרים"},
+    {"command": "allow", "description": "אישור אתר"},
+    {"command": "block", "description": "חסימת אתר"},
+    {"command": "fullnet", "description": "להציע גם אינטרנט מלא"},
+    {"command": "apps", "description": "אפליקציות באנדרואיד: לחסום או בלי אינטרנט"},
+    {"command": "update", "description": "לעדכן את האפליקציה במכשירים"},
+    {"command": "kids", "description": "חשבונות וסיסמאות"},
+    {"command": "addkid", "description": "הוספת ילד"},
+    {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
+    {"command": "web", "description": "ממשק ניהול באינטרנט"},
+    {"command": "history", "description": "היסטוריית אירועים"},
+    {"command": "audit", "description": "בדיקה אם נמחקו הודעות"},
+    {"command": "learn", "description": "סיכום הלמידה של הילדים ויעדים"},
+    {"command": "help", "description": "עזרה"},
+]
+
+
 # ------------------------------------------------------------------------- Core
 
 class HomeGuard:
@@ -921,7 +943,18 @@ class HomeGuard:
             result = self.decide(f"ex:{parts[1]}:{minutes}", who, chat)
         self.reply(chat, f"{result} ({fmt_min(minutes)})")
 
+    def set_menus(self) -> None:
+        """Commands are for the main parent only: their chat gets the menu, everyone else none."""
+        if not self.tg:
+            return
+        self.tg.call("setMyCommands", commands=[])
+        for chat in self.parents:
+            self.tg.call("setMyCommands", commands=MENU if chat == self.owner() else [],
+                         scope={"type": "chat", "chat_id": chat})
+
     def handle_command(self, chat: int, cmd: str, arg: str) -> None:
+        if chat != self.owner() and not (cmd == "/owner" and not self.db.setting("owner_chat", "")):
+            return  # the other parent only answers requests with the buttons
         if cmd in ("/start", "/help"):
             self.reply(chat, HELP)
         elif cmd == "/status":
@@ -1007,6 +1040,7 @@ class HomeGuard:
             # The first parent to send it becomes the main parent; after that only they can change it.
             if not self.db.setting("owner_chat", "") or chat == self.owner():
                 self.db.set_setting("owner_chat", str(chat))
+                self.set_menus()
             self.reply(chat, f"👑 ההורה הראשי: {self.parent_name(self.owner())}. רק אצלו/ה מגיעות כניסות מאסטר "
                              "ואישורי אינטרנט מלא.")
         elif cmd == "/botonly":
@@ -1678,25 +1712,7 @@ def run(cfg: dict) -> None:
     db = DB(cfg["db"])
     tg = Telegram(cfg["telegram_token"])
     hg = HomeGuard(cfg, db, tg)
-    tg.call("setMyCommands", commands=[
-        {"command": "status", "description": "מצב המחשבים"},
-        {"command": "lock", "description": "נעילת מחשב"},
-        {"command": "extend", "description": "הוספת זמן"},
-        {"command": "sites", "description": "רשימות אתרים"},
-        {"command": "allow", "description": "אישור אתר"},
-        {"command": "block", "description": "חסימת אתר"},
-        {"command": "fullnet", "description": "להציע גם אינטרנט מלא"},
-        {"command": "apps", "description": "אפליקציות באנדרואיד: לחסום או בלי אינטרנט"},
-        {"command": "update", "description": "לעדכן את האפליקציה במכשירים"},
-        {"command": "kids", "description": "חשבונות וסיסמאות"},
-        {"command": "addkid", "description": "הוספת ילד"},
-        {"command": "resetpw", "description": "סיסמה זמנית חדשה"},
-        {"command": "web", "description": "ממשק ניהול באינטרנט"},
-        {"command": "history", "description": "היסטוריית אירועים"},
-        {"command": "audit", "description": "בדיקה אם נמחקו הודעות"},
-        {"command": "learn", "description": "סיכום הלמידה של הילדים ויעדים"},
-        {"command": "help", "description": "עזרה"},
-    ])
+    hg.set_menus()
 
     server = ThreadingHTTPServer((cfg["listen"], int(cfg["port"])), make_handler(hg))
     threading.Thread(target=server.serve_forever, daemon=True).start()
