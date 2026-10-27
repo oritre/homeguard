@@ -256,6 +256,25 @@ class ServerTest(unittest.TestCase):
         self.assertFalse(self.hg.login("salon", "mom", "")["ok"])
         self.assertTrue(self.hg.login("salon", "mom", "9999")["approved"])
 
+    def test_full_internet_and_master_only_for_main_parent(self):
+        self.db.set_setting("full_internet", "1")
+        self.hg.handle_command(2, "/owner", "")  # first to claim becomes the main parent
+        self.hg.handle_command(1, "/owner", "")  # can't take it over
+        self.assertEqual(self.hg.owner(), 2)
+        self.tg.calls.clear()
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        by_chat = {m["chat_id"]: [b["callback_data"] for row in m["reply_markup"]["inline_keyboard"] for b in row]
+                   for m in self.tg.sent()}
+        self.assertIn(f"ap:{rid}:full:60", by_chat[2])
+        self.assertNotIn(f"ap:{rid}:full:60", by_chat[1])
+        self.assertIn(f"ap:{rid}:allowlist:60", by_chat[1])
+        self.assertNotEqual(self.hg.decide(f"ap:{rid}:full:60", "חגית", 1), "אושר")
+        self.assertEqual(self.hg.decide(f"ap:{rid}:full:60", "אורי", 2), "אושר")
+        self.db.add_kid("mom", "9999", "אמא", role="master")
+        self.tg.calls.clear()
+        self.hg.login("room", "mom", "9999")
+        self.assertEqual([m["chat_id"] for m in self.tg.sent()], [2])
+
     def test_activity_while_locked_alerts_parents_once(self):
         res = self.hg.report_activity("tablet", "YouTube פתוח 3 דקות")
         self.assertTrue(res["sent"])

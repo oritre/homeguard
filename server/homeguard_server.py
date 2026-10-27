@@ -334,12 +334,16 @@ class HomeGuard:
         self.web = WebAdmin(self)
 
     # ---- messaging helpers
-    def notify(self, text: str, keyboard=None) -> list[list[int]]:
+    def owner(self) -> int:
+        """The main parent: only they get master sign-ins and full-internet approvals (/owner)."""
+        return int(self.db.setting("owner_chat", "") or self.parents[0])
+
+    def notify(self, text: str, keyboard=None, chats=None) -> list[list[int]]:
         sent = []
         if not self.tg:
             log.info("NOTIFY: %s", text)
             return sent
-        for chat in self.parents:
+        for chat in chats if chats is not None else self.parents:
             mid = self.send(chat, text, {"inline_keyboard": keyboard} if keyboard else None)
             if mid:
                 sent.append([chat, mid])
@@ -468,7 +472,7 @@ class HomeGuard:
             self.db.start_session(pc, name, "open", 0)
             rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, status, decided_by) "
                             "VALUES ('login',?,?,?,'approved','master')", (pc, name, now))
-            self.notify(f"🔓 {kid['display']} נכנס/ה למחשב '{pc}' עם חשבון מאסטר ({hhmm(now)})")
+            self.notify(f"🔓 {kid['display']} נכנס/ה למחשב '{pc}' עם חשבון מאסטר ({hhmm(now)})", chats=[self.owner()])
             return {"ok": True, "request_id": rid, "display": kid["display"], "approved": True}
         rid = self._access_request(pc, name, f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})", note)
         return {"ok": True, "request_id": rid, "display": kid["display"]}
@@ -495,18 +499,26 @@ class HomeGuard:
         note = " ".join(str(note).split())[:300]
         rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, session_id, detail) VALUES ('login',?,?,?,?,?)",
                         (pc, kid, time.time(), session_id, note or None))
-        kb = []
+        def message(modes):
+            kb = []
+            for mode in modes:
+                options = list(self.cfg["durations"]) + ([0] if mode != "offline" else [])
+                kb.append([{"text": f"{MODE_SHORT[mode]} {fmt_min(m) if m else '♾️'}",
+                            "callback_data": f"ap:{rid}:{mode}:{m}"} for m in options])
+            kb.append([{"text": f"⏱ זמן אחר {MODE_SHORT[mode]}", "callback_data": f"cu:{rid}:{mode}"}
+                       for mode in modes])
+            kb.append([{"text": "❌ לא עכשיו", "callback_data": f"dn:{rid}"}])
+            text = (head + (f"\n💬 {note}" if note else "") + "\n" +
+                    " · ".join(f"{MODE_SHORT[m]} {MODE_NAMES[m]}" for m in modes) + " · ♾️ ללא הגבלת זמן")
+            return text, kb
+
+        # Full internet is offered only to the main parent; the other parent gets the rest.
         modes = self.login_modes()
-        for mode in modes:
-            options = list(self.cfg["durations"]) + ([0] if mode != "offline" else [])
-            kb.append([{"text": f"{MODE_SHORT[mode]} {fmt_min(m) if m else '♾️'}",
-                        "callback_data": f"ap:{rid}:{mode}:{m}"} for m in options])
-        kb.append([{"text": f"⏱ זמן אחר {MODE_SHORT[mode]}", "callback_data": f"cu:{rid}:{mode}"}
-                   for mode in modes])
-        kb.append([{"text": "❌ לא עכשיו", "callback_data": f"dn:{rid}"}])
-        text = (head + (f"\n💬 {note}" if note else "") + "\n" +
-                " · ".join(f"{MODE_SHORT[m]} {MODE_NAMES[m]}" for m in modes) + " · ♾️ ללא הגבלת זמן")
-        msgs = self.notify(text, kb)
+        owner = self.owner()
+        others = [c for c in self.parents if c != owner]
+        msgs = self.notify(*message(modes), chats=[owner])
+        if others:
+            msgs += self.notify(*message([m for m in modes if m != "full"]), chats=others)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return rid
 
@@ -710,7 +722,8 @@ class HomeGuard:
             self.notify(f"👋 {self.db.kid_display(s['kid'])} סיים/ה במחשב '{pc}'")
 
     # ---- parent actions (Telegram callbacks)
-    def decide(self, data: str, who: str) -> str:
+    def decide(self, data: str, who: str, chat: int | None = None) -> str:
+        """chat: the parent's Telegram chat (None from the web page, which has its own password)."""
         parts = data.split(":")
         kind = parts[0]
         rid = int(parts[1])
@@ -728,6 +741,8 @@ class HomeGuard:
             return "נדחה"
         if kind == "ap":
             mode, minutes = parts[2], int(parts[3])
+            if mode in ("full", "open") and chat is not None and chat != self.owner():
+                return f"אינטרנט מלא מאשר/ת רק {self.parent_name(self.owner())}"
             sid, ends = self.db.start_session(r["pc"], r["kid"], mode, minutes)
             self.db.x("UPDATE requests SET status='approved', decided_by=?, session_id=? WHERE id=?", (who, sid, rid))
             length = "ללא הגבלת זמן" if minutes <= 0 else f"ל{fmt_min(minutes)}, עד {hhmm(ends)}"
@@ -838,7 +853,7 @@ class HomeGuard:
                 answer = self.set_app_rule(int(app_id), rule)
                 self.refresh_app_row(cq, int(app_id))
             else:
-                answer = self.decide(data, who)
+                answer = self.decide(data, who, chat)
             if self.tg:
                 self.tg.call("answerCallbackQuery", callback_query_id=cq["id"], text=answer)
             return
@@ -897,12 +912,13 @@ class HomeGuard:
             return
         data = self.awaiting_time.pop(chat)
         parts = data.split(":")
+        who = self.parent_name(chat)
         if parts[0] == "cu":
-            result = self.decide(f"ap:{parts[1]}:{parts[2]}:{minutes}", "הורה")
+            result = self.decide(f"ap:{parts[1]}:{parts[2]}:{minutes}", who, chat)
         elif parts[0] == "cs":
-            result = self.decide(f"st:{parts[1]}:{minutes}", "הורה")
+            result = self.decide(f"st:{parts[1]}:{minutes}", who, chat)
         else:
-            result = self.decide(f"ex:{parts[1]}:{minutes}", "הורה")
+            result = self.decide(f"ex:{parts[1]}:{minutes}", who, chat)
         self.reply(chat, f"{result} ({fmt_min(minutes)})")
 
     def handle_command(self, chat: int, cmd: str, arg: str) -> None:
@@ -987,6 +1003,12 @@ class HomeGuard:
             self.reply(chat, "🔑 כניסה עם סיסמה: פעילה" if self.passwords_required() else
                        "👆 כניסה בלי סיסמה: הילד בוחר את השם שלו ואתם מאשרים. (מאסטר תמיד עם סיסמה)\n"
                        "לשינוי: /passwords on או /passwords off")
+        elif cmd == "/owner":
+            # The first parent to send it becomes the main parent; after that only they can change it.
+            if not self.db.setting("owner_chat", "") or chat == self.owner():
+                self.db.set_setting("owner_chat", str(chat))
+            self.reply(chat, f"👑 ההורה הראשי: {self.parent_name(self.owner())}. רק אצלו/ה מגיעות כניסות מאסטר "
+                             "ואישורי אינטרנט מלא.")
         elif cmd == "/botonly":
             if arg in ("on", "off"):
                 self.db.set_setting("bot_only", "1" if arg == "on" else "0")
@@ -1433,6 +1455,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 
 👧 חשבונות:
 /passwords on|off – כניסה עם סיסמה או רק בחירת שם (ברירת מחדל: בלי סיסמה)
+/owner – אני ההורה הראשי: רק אצלי כניסות מאסטר ואישורי אינטרנט מלא
 /botonly on|off – ילדים נכנסים רק בבקשה בבוט, בלי סיסמה (ברירת מחדל: on)
 ⏱ בכל בקשה יש "זמן אחר": כותבים 45, 2 שעות או 18:30
 /kids – כל החשבונות והסיסמאות
