@@ -298,6 +298,7 @@ $("#loginForm").addEventListener("submit", async (e) => {
   const res = await api("/admin/api/login", { password: $("#pw").value });
   if (!res.ok) { toast(res.error, true); return; }
   $("#pw").value = "";
+  lastActive = Date.now();
   start();
 });
 
@@ -571,6 +572,21 @@ async function start() {
   setInterval(tickClocks, 1000);
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S) refresh(); });
+
+// Sign out after a minute without touching the page (also when coming back to a tab left open).
+const IDLE_MS = 60 * 1000;
+let lastActive = Date.now();
+for (const ev of ["pointerdown", "keydown", "scroll", "touchstart", "mousemove"]) {
+  document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true });
+}
+async function idleCheck() {
+  if ($("#app").classList.contains("hidden") || Date.now() - lastActive < IDLE_MS) return;
+  clearInterval(timer);
+  await api("/admin/api/logout", {});
+  showLogin("התנתקתם אחרי דקה בלי פעילות. הכניסו שוב את הסיסמה.");
+}
+setInterval(idleCheck, 2000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) idleCheck(); });
 start();
 </script>
 </body>
