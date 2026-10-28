@@ -69,6 +69,9 @@ class LockScreen:
         self.root.geometry(self.full_geometry)
         self.root.attributes("-topmost", True)
         self.root.bind_all("<Alt-F4>", lambda e: "break")
+        # Remember which field the kid typed in, so keep_on_top can give the keyboard back to it
+        self.focus_widget = self.root
+        self.root.bind_all("<FocusIn>", lambda e: setattr(self, "focus_widget", e.widget), add="+")
 
         self.state = "locked"  # locked | waiting | unlocked
         self.request_id = None
@@ -185,9 +188,13 @@ class LockScreen:
             self.root.geometry(self.full_geometry)
             self.root.lift()
             self.root.attributes("-topmost", True)
+            # Only take the keyboard back when another window has it. Forcing focus onto the root window
+            # every time pulled it out of the username/password fields, so typed text went nowhere.
             try:
-                self.root.focus_force()
-            except tk.TclError:
+                if self.root.focus_get() is None:
+                    w = self.focus_widget
+                    (w if w.winfo_exists() and w.winfo_ismapped() else self.root).focus_force()
+            except (tk.TclError, KeyError):
                 pass
         else:
             self.timer.lift()
