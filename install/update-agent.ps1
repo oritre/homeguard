@@ -22,28 +22,49 @@ $pending = "$data\pending"
 $tmp = "$data\update-tmp"
 function Say($text) { if (-not $auto) { Write-Host $text } }
 
-# 1. Download a new version into $pending. Fails quietly while this PC has no internet (it's locked);
-#    the next hourly run tries again.
-$sha = $null
-try {
-    $sha = (Invoke-RestMethod "https://api.github.com/repos/oritre/homeguard/commits/main" -UseBasicParsing).sha
-} catch {
-    if (-not $auto) { throw "אין חיבור ל-GitHub: $_" }
+if ($auto) {
+    # A log for the parents: C:\ProgramData\HomeGuard\update.log (only the last run)
+    Start-Transcript "$data\update.log" -Force | Out-Null
 }
-$installed = Get-Content "$data\version.txt" -ErrorAction SilentlyContinue
-$staged = Get-Content "$pending\.sha" -ErrorAction SilentlyContinue
-if ($sha -and $sha -ne $installed -and $sha -ne $staged) {
-    Say "מוריד את הגרסה האחרונה..."
-    Remove-Item $tmp, $pending -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory $tmp | Out-Null
-    Invoke-WebRequest "https://github.com/oritre/homeguard/archive/$sha.zip" -OutFile "$tmp\hg.zip" -UseBasicParsing
-    Expand-Archive "$tmp\hg.zip" $tmp
-    $src = Get-ChildItem $tmp -Directory | Select-Object -First 1
-    New-Item -ItemType Directory $pending | Out-Null
-    Copy-Item "$($src.FullName)\agent\*" $pending -Recurse -Force
-    Copy-Item "$($src.FullName)\install\update-agent.ps1" $pending -Force
-    Set-Content "$pending\.sha" $sha
+
+# 1. Download a new version into $pending. While the PC is locked the internet is closed, so open GitHub's
+#    addresses (the DNS filter answers for them even then) just for this run. If it fails, the next hourly
+#    run tries again.
+$gitHubRule = "HomeGuard-UpdateNow"
+try {
+    $ips = @("api.github.com", "github.com", "codeload.github.com") | ForEach-Object {
+        Resolve-DnsName $_ -Type A -ErrorAction SilentlyContinue | Where-Object IPAddress | ForEach-Object IPAddress
+    } | Select-Object -Unique
+    Remove-NetFirewallRule -Name $gitHubRule -ErrorAction SilentlyContinue
+    if ($ips) {
+        New-NetFirewallRule -Name $gitHubRule -DisplayName $gitHubRule -Direction Outbound -Action Allow `
+            -RemoteAddress $ips -Protocol TCP -RemotePort 443 | Out-Null
     }
+} catch { Write-Output "firewall: $_" }
+try {
+    $sha = $null
+    try {
+        $sha = (Invoke-RestMethod "https://api.github.com/repos/oritre/homeguard/commits/main" -UseBasicParsing).sha
+    } catch {
+        if (-not $auto) { throw "אין חיבור ל-GitHub: $_" }
+    }
+    $installed = Get-Content "$data\version.txt" -ErrorAction SilentlyContinue
+    $staged = Get-Content "$pending\.sha" -ErrorAction SilentlyContinue
+    if ($sha -and $sha -ne $installed -and $sha -ne $staged) {
+        Say "מוריד את הגרסה האחרונה..."
+        Remove-Item $tmp, $pending -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory $tmp | Out-Null
+        Invoke-WebRequest "https://github.com/oritre/homeguard/archive/$sha.zip" -OutFile "$tmp\hg.zip" -UseBasicParsing
+        Expand-Archive "$tmp\hg.zip" $tmp
+        $src = Get-ChildItem $tmp -Directory | Select-Object -First 1
+        New-Item -ItemType Directory $pending | Out-Null
+        Copy-Item "$($src.FullName)\agent\*" $pending -Recurse -Force
+        Copy-Item "$($src.FullName)\install\update-agent.ps1" $pending -Force
+        Set-Content "$pending\.sha" $sha
+    }
+} finally {
+    Remove-NetFirewallRule -Name $gitHubRule -ErrorAction SilentlyContinue
+}
 
 # 2. Install it. Restarting the agent cuts a running session for a few seconds, so the task waits until
 #    no kid is using approved time (locked, signed out or a parent), or the PC starts up.
@@ -76,7 +97,7 @@ if ((Test-Path "$pending\.sha") -and (-not $auto -or -not (Kid-Session))) {
 } else {
     Say "הסוכן כבר מעודכן."
 }
-if ($auto) { return }
+if ($auto) { Stop-Transcript | Out-Null; return }
 
 # Automatic updates from now on: at startup and every hour, as SYSTEM
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
