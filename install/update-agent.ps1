@@ -66,6 +66,10 @@ if ((Test-Path "$pending\.sha") -and (-not $auto -or -not (Kid-Session))) {
     [IO.File]::WriteAllText("$app\update-agent.ps1", $text, [Text.UTF8Encoding]::new($true))
     Set-Content "$data\version.txt" $new
     Remove-Item $pending -Recurse -Force -ErrorAction SilentlyContinue
+    # Restart the lock screen too, so the new version runs (the agent brings it back within seconds)
+    Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
+        Where-Object { $_.CommandLine -like "*lockscreen.pyw*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-ScheduledTask -TaskName "HomeGuard Agent"
     Say "הסוכן עודכן והופעל מחדש."
 } else {

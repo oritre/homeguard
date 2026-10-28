@@ -202,7 +202,7 @@ class Agent:
             try:
                 sid, user = winctl.console_session()
                 now = time.time()
-                if (not user or self.is_exempt(user) or now - self.last_heartbeat < 6
+                if (not user or self.is_exempt(user) or now - self.last_heartbeat < 10
                         or now - last_launch < 8):
                     continue
                 last_launch = now

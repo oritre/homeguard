@@ -34,8 +34,13 @@ def single_instance() -> bool:
     if sys.platform != "win32":
         return True
     import ctypes
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\HomeGuardLockScreen")
-    return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    global _mutex  # held for the life of the process
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    _mutex = k32.CreateMutexW(None, False, "Local\\HomeGuardLockScreen")
+    # A second copy (the agent and the logon task both start one) must quit, or the two windows
+    # keep pulling focus from each other and typed text lands in the hidden one.
+    return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
 
 
 def virtual_screen(root: tk.Tk) -> tuple[int, int, int, int]:
