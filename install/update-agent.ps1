@@ -105,8 +105,18 @@ if ($answer -match '^(y|Y|כ)') {
     }
     if (-not (Test-Path $rd)) { throw "RustDesk לא הותקן. נסו שוב או התקינו מ-rustdesk.com" }
     $pw = Read-Host "סיסמה קבועה לשליטה מרחוק (לפחות 8 תווים)"
-    & $rd --password $pw | Out-Null
-    & $rd --option direct-server Y | Out-Null
+    # The settings go through the RustDesk service, which takes a moment to start after installing
+    for ($i = 0; $i -lt 30; $i++) {
+        if ((Get-Service RustDesk -ErrorAction SilentlyContinue).Status -eq "Running") { break }
+        Start-Service RustDesk -ErrorAction SilentlyContinue
+        Start-Sleep 2
+    }
+    for ($i = 0; $i -lt 10; $i++) {
+        & $rd --password $pw | Out-Null
+        & $rd --option direct-server Y | Out-Null
+        if (((& $rd --option direct-server) | Out-String).Trim() -eq "Y") { break }
+        Start-Sleep 3
+    }
     # HomeGuard blocks incoming connections; let the home network reach RustDesk only.
     netsh advfirewall firewall delete rule name="HomeGuard-Remote" | Out-Null
     netsh advfirewall firewall add rule name="HomeGuard-Remote" dir=in action=allow protocol=TCP `
