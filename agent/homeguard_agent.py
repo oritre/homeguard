@@ -197,17 +197,27 @@ class Agent:
             exe = exe[:-len("python.exe")] + "pythonw.exe"
         cmd = f'"{exe}" "{os.path.join(app, "lockscreen.pyw")}"'
         last_launch = 0.0
+        seen = (None, "")
+        retry_until = 0.0  # after a sign-in, keep trying for a while even if the heartbeat looks fresh
         while True:
-            time.sleep(0.5)
+            time.sleep(0.3)
             try:
                 sid, user = winctl.console_session()
                 now = time.time()
-                if (not user or self.is_exempt(user) or now - self.last_heartbeat < 10
-                        or now - last_launch < 8):
+                if (sid, user) != seen:
+                    seen = (sid, user)
+                    retry_until = now + 20  # the heartbeat may still be from the previous kid
+                if not user or self.is_exempt(user):
+                    continue
+                if now >= retry_until and (now - self.last_heartbeat < 10 or now - last_launch < 8):
+                    continue
+                if now < retry_until and now - last_launch < 1:
                     continue
                 last_launch = now
-                log.info("lock screen not answering for %s, starting it", user)
-                winctl.launch_in_session(sid, cmd, app)
+                log.info("starting the lock screen for %s", user)
+                # Right after sign-in Windows may not hand out the user's token yet; it tries again in a second
+                if winctl.launch_in_session(sid, cmd, app):
+                    retry_until = 0.0
             except Exception:
                 log.exception("lockscreen guard failed")
 

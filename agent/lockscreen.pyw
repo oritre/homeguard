@@ -68,6 +68,7 @@ class LockScreen:
         self.full_geometry = f"{w}x{h}+{x}+{y}"
         self.root.geometry(self.full_geometry)
         self.root.attributes("-topmost", True)
+        self.root.update()  # cover the desktop now, before building the rest and asking the server anything
         self.root.bind_all("<Alt-F4>", lambda e: "break")
         # Remember which field the kid typed in, so keep_on_top can give the keyboard back to it
         self.focus_widget = self.root
