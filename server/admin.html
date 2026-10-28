@@ -268,8 +268,13 @@ function toast(msg, err) {
   clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = "none", err ? 6000 : 3500);
 }
 
+const IDLE_MS = 60 * 1000;
+let lastActive = Date.now();
+
 async function api(path, body) {
-  const opt = body ? { method: "POST", headers: { "Content-Type": "application/json", "X-HG": "1" }, body: JSON.stringify(body) } : {};
+  // X-HG-Active tells the server the parent is using the page; only that keeps the sign-in alive.
+  const headers = Date.now() - lastActive < IDLE_MS ? { "X-HG-Active": "1" } : {};
+  const opt = body ? { method: "POST", headers: { ...headers, "Content-Type": "application/json", "X-HG": "1" }, body: JSON.stringify(body) } : { headers };
   const r = await fetch(path, { ...opt, credentials: "same-origin" });
   if (r.status === 401) { showLogin(); throw new Error("צריך להתחבר"); }
   return r.json();
@@ -574,11 +579,19 @@ async function start() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S) refresh(); });
 
 // Sign out after a minute without touching the page (also when coming back to a tab left open).
-const IDLE_MS = 60 * 1000;
-let lastActive = Date.now();
+// The server enforces the same minute, so a page left closed or asleep is signed out too.
 for (const ev of ["pointerdown", "keydown", "scroll", "touchstart", "mousemove"]) {
-  document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true });
+  document.addEventListener(ev, () => {
+    const was = lastActive; lastActive = Date.now();
+    // Tell the server about activity during a quiet stretch, not only on the next refresh.
+    if (lastActive - was > 20000 && !$("#app").classList.contains("hidden")) api("/admin/api/whoami").catch(() => {});
+  }, { passive: true, capture: true });
 }
+// Closing the page (or the browser) signs out.
+window.addEventListener("pagehide", () => {
+  if ($("#app").classList.contains("hidden")) return;
+  try { fetch("/admin/api/logout", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "Content-Type": "application/json", "X-HG": "1" }, body: "{}" }); } catch {}
+});
 async function idleCheck() {
   if ($("#app").classList.contains("hidden") || Date.now() - lastActive < IDLE_MS) return;
   clearInterval(timer);

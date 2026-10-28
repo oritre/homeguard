@@ -332,6 +332,63 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(db.kid("a")["role"], "kid")
 
 
+class WebAdminSessionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(self.tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.hg = hs.HomeGuard(cfg, self.db, FakeTelegram())
+        self.web = self.hg.web
+        self.web.set_password("password1")
+
+    def _age(self, token, seconds):
+        self.db.x("UPDATE web_sessions SET last_used=last_used-? WHERE token_hash=?",
+                  (seconds, self.web._token_hash(token)))
+
+    def test_browser_sign_in_ends_after_a_minute_idle(self):
+        tok = self.web.login("password1", "1.2.3.4", "test")["token"]
+        self.assertTrue(self.web.session(tok))
+        self._age(tok, 61)
+        self.assertIsNone(self.web.session(tok))
+        self.assertFalse(self.db.q("SELECT 1 FROM web_sessions"))
+
+    def test_only_activity_keeps_browser_sign_in(self):
+        tok = self.web.login("password1", "1.2.3.4", "test")["token"]
+        self._age(tok, 50)
+        self.assertTrue(self.web.session(tok))  # background refresh: doesn't extend
+        self._age(tok, 11)
+        self.assertIsNone(self.web.session(tok))
+        tok = self.web.login("password1", "1.2.3.4", "test")["token"]
+        self._age(tok, 50)
+        self.assertTrue(self.web.session(tok, active=True))
+        self._age(tok, 50)
+        self.assertTrue(self.web.session(tok))
+
+    def test_script_tokens_are_not_idle_limited(self):
+        tok = self.web.new_token("טוקן · x", 86400)
+        self._age(tok, 3600)
+        self.assertTrue(self.web.session(tok))
+
+    def test_tick_drops_idle_browser_sign_ins(self):
+        tok = self.web.login("password1", "1.2.3.4", "test")["token"]
+        self._age(tok, 120)
+        self.hg.tick()
+        self.assertFalse(self.db.q("SELECT 1 FROM web_sessions"))
+
+    def test_cookie_is_not_remembered(self):
+        port = free_port()
+        srv = ThreadingHTTPServer(("127.0.0.1", port), hs.make_handler(self.hg))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/admin/api/login", data=b'{"password":"password1"}',
+                                     headers={"X-HG": "1", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as r:
+            cookie = r.headers["Set-Cookie"]
+        self.assertIn("hg_admin=", cookie)
+        self.assertNotIn("Max-Age", cookie)
+        self.assertNotIn("Expires", cookie)
+
+
 class SiteApprovalTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp()
