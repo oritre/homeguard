@@ -183,9 +183,12 @@ class DB:
                                      ("sites", "expires", "REAL"),
                                      ("sites", "session_id", "INTEGER"),
                                      ("requests", "detail", "TEXT"),
-                                     ("pcs", "version", "INTEGER")):
+                                     ("pcs", "version", "INTEGER"),
+                                     ("web_sessions", "kind", "TEXT NOT NULL DEFAULT 'browser'")):
                 if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                    if col == "kind":
+                        self.conn.execute("UPDATE web_sessions SET kind='token' WHERE label LIKE 'טוקן%'")
             # The old "no internet" app rule became "works even without internet".
             self.conn.execute("UPDATE apps SET rule='always' WHERE rule='nonet'")
             self.conn.commit()
@@ -851,6 +854,7 @@ class HomeGuard:
         self.db.x("DELETE FROM sites WHERE session_id IS NOT NULL AND session_id NOT IN "
                   "(SELECT id FROM sessions WHERE active=1)")
         self.db.x("DELETE FROM failed_logins WHERE ts<?", (now - 3600,))
+        self.web.drop_idle()
 
     # ---- Telegram update handling
     def handle_update(self, upd: dict) -> None:
@@ -1165,10 +1169,14 @@ class WebAdmin:
 
     Behind a password the parents set with /webpass (stored hashed). Signing in gives a random
     token (cookie for the page, or "Authorization: Bearer" for scripts); only its hash is stored.
+    A browser sign-in is never remembered: the cookie lives only while the browser is open, the page
+    signs out when it is closed, and the server drops it after IDLE_SECONDS without the parent touching
+    the page (the page's background refreshes don't count).
     Every web sign-in is reported in Telegram, and too many wrong passwords lock the page for a while."""
 
     WHO = "ממשק אינטרנט"
-    SESSION_DAYS = 30
+    IDLE_SECONDS = 60
+    SESSION_HOURS = 12  # hard limit for a browser sign-in, even while in use
     TOKEN_DAYS = 365
 
     def __init__(self, hg: HomeGuard):
@@ -1193,23 +1201,37 @@ class WebAdmin:
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def new_token(self, label: str, days: int, ip: str = "") -> str:
+    def new_token(self, label: str, seconds: float, ip: str = "", kind: str = "token") -> str:
         token = secrets.token_urlsafe(32)
         now = time.time()
-        self.db.x("INSERT INTO web_sessions (token_hash, label, created, expires, last_used, ip) VALUES (?,?,?,?,?,?)",
-                  (self._token_hash(token), label[:80], now, now + days * 86400, now, ip[:64]))
+        self.db.x("INSERT INTO web_sessions (token_hash, label, created, expires, last_used, ip, kind) "
+                  "VALUES (?,?,?,?,?,?,?)",
+                  (self._token_hash(token), label[:80], now, now + seconds, now, ip[:64], kind))
         return token
 
-    def session(self, token: str):
+    def session(self, token: str, active: bool = False):
+        """The sign-in behind a token, or None. active: the parent did something on the page just now,
+        which keeps a browser sign-in alive for another IDLE_SECONDS."""
         if not token:
             return None
-        rows = self.db.q("SELECT * FROM web_sessions WHERE token_hash=? AND expires>?",
-                         (self._token_hash(token), time.time()))
+        now = time.time()
+        rows = self.db.q("SELECT * FROM web_sessions WHERE token_hash=? AND expires>?", (self._token_hash(token), now))
         if not rows:
             return None
-        if time.time() - (rows[0]["last_used"] or 0) > 60:
-            self.db.x("UPDATE web_sessions SET last_used=? WHERE id=?", (time.time(), rows[0]["id"]))
-        return rows[0]
+        s = rows[0]
+        if s["kind"] == "browser":
+            if now - (s["last_used"] or 0) > self.IDLE_SECONDS:
+                self.db.x("DELETE FROM web_sessions WHERE id=?", (s["id"],))
+                return None
+            if active:
+                self.db.x("UPDATE web_sessions SET last_used=? WHERE id=?", (now, s["id"]))
+        elif now - (s["last_used"] or 0) > 60:
+            self.db.x("UPDATE web_sessions SET last_used=? WHERE id=?", (now, s["id"]))
+        return s
+
+    def drop_idle(self) -> None:
+        self.db.x("DELETE FROM web_sessions WHERE kind='browser' AND (last_used IS NULL OR last_used<? OR expires<?)",
+                  (time.time() - self.IDLE_SECONDS, time.time()))
 
     def logout(self, token: str) -> None:
         self.db.x("DELETE FROM web_sessions WHERE token_hash=?", (self._token_hash(token),))
@@ -1229,7 +1251,7 @@ class WebAdmin:
                                "הממשק חסום ל-10 דקות.")
             return {"ok": False, "error": "סיסמה שגויה"}
         device = " ".join(agent.split())[:80]
-        token = self.new_token(f"דפדפן · {device}" if device else "דפדפן", self.SESSION_DAYS, ip)
+        token = self.new_token(f"דפדפן · {device}" if device else "דפדפן", self.SESSION_HOURS * 3600, ip, "browser")
         self.hg.notify(f"🖥 כניסה לממשק הניהול ({hhmm(now)}, {ip})")
         return {"ok": True, "token": token}
 
@@ -1436,7 +1458,7 @@ class WebAdmin:
             return {"ok": True, "message": f"נבדקו {checked} הודעות" + (f", {len(gone)} נמחקו (נשלח דיווח בטלגרם)" if gone else ", כולן במקום")}
         if a == "token_new":
             label = " ".join(str(body.get("label", "")).split())[:60] or "טוקן גישה"
-            token = self.new_token(f"טוקן · {label}", self.TOKEN_DAYS)
+            token = self.new_token(f"טוקן · {label}", self.TOKEN_DAYS * 86400)
             hg.notify(f"🔑 נוצר טוקן גישה לממשק הניהול: {label}")
             return {"ok": True, "token": token, "message": "הטוקן מוצג פעם אחת בלבד. שמרו אותו."}
         if a == "token_revoke":
@@ -1563,9 +1585,9 @@ def make_handler(hg: HomeGuard):
             self.send_header("Cache-Control", "no-store")
             if cookie is not None:
                 secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "") == "https" else ""
-                age = WebAdmin.SESSION_DAYS * 86400 if cookie else 0
-                self.send_header("Set-Cookie", f"hg_admin={cookie}; Path=/admin; HttpOnly; SameSite=Strict; "
-                                               f"Max-Age={age}{secure}")
+                # No Max-Age on a sign-in: a session cookie, gone when the browser closes (never "remembered").
+                age = "" if cookie else "; Max-Age=0"
+                self.send_header("Set-Cookie", f"hg_admin={cookie}; Path=/admin; HttpOnly; SameSite=Strict{age}{secure}")
             self.end_headers()
             self.wfile.write(body)
 
@@ -1608,7 +1630,8 @@ def make_handler(hg: HomeGuard):
                     self._admin_json(200, res, cookie=res.get("token") if res.get("ok") else None)
                     return
             tok = self._admin_token()
-            sess = hg.web.session(tok)
+            # The page marks requests made while the parent is using it; background refreshes aren't marked.
+            sess = hg.web.session(tok, active=self.headers.get("X-HG-Active") == "1")
             if path == "/admin/api/whoami":
                 self._admin_json(200, {"signed_in": bool(sess), "password_set": hg.web.password_set()})
                 return
