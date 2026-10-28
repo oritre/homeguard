@@ -68,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File install\install-agent.ps1 `
 ```powershell
 irm https://raw.githubusercontent.com/oritre/homeguard/main/install/update-agent.ps1 | iex
 ```
-הסוכן מכבה ב-Windows את "ניתוק רך" של ה-Wi-Fi ומשאיר את בדיקת האינטרנט של Windows (msftconnecttest.com) פתוחה גם בנעילה,
+המחשב מתעדכן מאז לבד (משימה "HomeGuard Update" כל שעה ובעלייה; ההתקנה מחכה שאף ילד לא יהיה מחובר). הסוכן מכבה ב-Windows את "ניתוק רך" של ה-Wi-Fi ומשאיר את בדיקת האינטרנט של Windows (msftconnecttest.com) פתוחה גם בנעילה,
 אחרת Windows מנתק את ה-Wi-Fi כשהאינטרנט חסום. מסך הנעילה מופעל ע"י הסוכן תוך שנייה מכניסה או מסגירה.
 בטאבלט, RustDesk (`com.carriez.flutter_hbb`) לא מושעה ולא עובר דרך ה-VPN, כדי שאפשר יהיה לשלוט בו גם כשהוא נעול.
 

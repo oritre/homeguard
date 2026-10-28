@@ -1,50 +1,103 @@
 <#
   HomeGuard - עדכון הסוכן על מחשב של הילדים (בלי להתקין מחדש), ואופציונלית שליטה מרחוק (RustDesk).
-  להריץ ב-PowerShell כמנהל (Run as Administrator) על מחשב הילדים:
+  להריץ פעם אחת ב-PowerShell כמנהל (Run as Administrator) על מחשב הילדים:
 
     irm https://raw.githubusercontent.com/oritre/homeguard/main/install/update-agent.ps1 | iex
 
+  מאז המחשב מתעדכן לבד: המשימה "HomeGuard Update" (SYSTEM) בודקת כל שעה ובעליית המחשב אם יש גרסה חדשה ב-GitHub.
   ההגדרות (שרת, טוקן, שם מחשב) נשארות כמו שהן ב-C:\ProgramData\HomeGuard\agent.json.
 #>
 $ErrorActionPreference = "Stop"
 
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+$me = [Security.Principal.WindowsIdentity]::GetCurrent()
+$auto = $me.IsSystem  # run by the scheduled task: no questions, no output
+if (-not $auto -and -not ([Security.Principal.WindowsPrincipal]$me).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "צריך להריץ כמנהל (Run as Administrator)"
 }
 $app = "$env:ProgramFiles\HomeGuard"
+$data = "$env:ProgramData\HomeGuard"
 if (-not (Test-Path "$app\homeguard_agent.py")) { throw "HomeGuard לא מותקן כאן. השתמשו ב-install-agent.ps1" }
+$pending = "$data\pending"
+$tmp = "$data\update-tmp"
+function Say($text) { if (-not $auto) { Write-Host $text } }
 
-# 1. The latest agent files from GitHub
-$tmp = Join-Path $env:TEMP "homeguard-update"
-Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory $tmp | Out-Null
-Write-Host "מוריד את הגרסה האחרונה..."
-Invoke-WebRequest "https://github.com/oritre/homeguard/archive/refs/heads/main.zip" -OutFile "$tmp\hg.zip" -UseBasicParsing
-Expand-Archive "$tmp\hg.zip" $tmp
-$src = Get-ChildItem $tmp -Directory | Select-Object -First 1
+# 1. Download a new version into $pending. Fails quietly while this PC has no internet (it's locked);
+#    the next hourly run tries again.
+$sha = $null
+try {
+    $sha = (Invoke-RestMethod "https://api.github.com/repos/oritre/homeguard/commits/main" -UseBasicParsing).sha
+} catch {
+    if (-not $auto) { throw "אין חיבור ל-GitHub: $_" }
+}
+$installed = Get-Content "$data\version.txt" -ErrorAction SilentlyContinue
+$staged = Get-Content "$pending\.sha" -ErrorAction SilentlyContinue
+if ($sha -and $sha -ne $installed -and $sha -ne $staged) {
+    Say "מוריד את הגרסה האחרונה..."
+    Remove-Item $tmp, $pending -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory $tmp | Out-Null
+    Invoke-WebRequest "https://github.com/oritre/homeguard/archive/$sha.zip" -OutFile "$tmp\hg.zip" -UseBasicParsing
+    Expand-Archive "$tmp\hg.zip" $tmp
+    $src = Get-ChildItem $tmp -Directory | Select-Object -First 1
+    New-Item -ItemType Directory $pending | Out-Null
+    Copy-Item "$($src.FullName)\agent\*" $pending -Recurse -Force
+    Copy-Item "$($src.FullName)\install\update-agent.ps1" $pending -Force
+    Set-Content "$pending\.sha" $sha
+    }
 
-# 2. Replace the files and restart the agent (the lock screen restarts itself)
-Stop-ScheduledTask -TaskName "HomeGuard Agent" -ErrorAction SilentlyContinue
-Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
-    Where-Object { $_.CommandLine -like "*homeguard_agent.py*" } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Copy-Item "$($src.FullName)\agent\*" $app -Recurse -Force
-Start-ScheduledTask -TaskName "HomeGuard Agent"
-Write-Host "הסוכן עודכן והופעל מחדש."
+# 2. Install it. Restarting the agent cuts a running session for a few seconds, so the task waits until
+#    nobody (or a parent) is signed in, or the PC starts up. Run by hand, it installs right away.
+function Kid-Session {
+    try {
+        $st = Invoke-RestMethod "http://127.0.0.1:8765/state" -UseBasicParsing -TimeoutSec 5
+        return [bool]($st.user -and -not $st.exempt)
+    } catch { return $false }  # agent not running
+}
+if ((Test-Path "$pending\.sha") -and (-not $auto -or -not (Kid-Session))) {
+    Stop-ScheduledTask -TaskName "HomeGuard Agent" -ErrorAction SilentlyContinue
+    Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
+        Where-Object { $_.CommandLine -like "*homeguard_agent.py*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $new = Get-Content "$pending\.sha"
+    Remove-Item "$pending\.sha"
+    Copy-Item "$pending\*" $app -Recurse -Force
+    # Windows PowerShell reads a script without a BOM in the ANSI code page, which breaks the Hebrew text
+    $text = Get-Content "$pending\update-agent.ps1" -Raw -Encoding UTF8
+    [IO.File]::WriteAllText("$app\update-agent.ps1", $text, [Text.UTF8Encoding]::new($true))
+    Set-Content "$data\version.txt" $new
+    Remove-Item $pending -Recurse -Force -ErrorAction SilentlyContinue
+    Start-ScheduledTask -TaskName "HomeGuard Agent"
+    Say "הסוכן עודכן והופעל מחדש."
+} else {
+    Say "הסוכן כבר מעודכן."
+}
+if ($auto) { return }
+
+# Automatic updates from now on: at startup and every hour, as SYSTEM
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew -StartWhenAvailable
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$app\update-agent.ps1`""
+$hourly = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1)
+$boot = New-ScheduledTaskTrigger -AtStartup
+$boot.Delay = "PT1M"
+Register-ScheduledTask -TaskName "HomeGuard Update" -Action $action -Trigger $hourly, $boot `
+    -Principal (New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest) `
+    -Settings $settings -Force | Out-Null
+Say "עדכון אוטומטי מופעל: המחשב יבדוק כל שעה אם יש גרסה חדשה."
 
 # 3. Remote control from the parents' PC over the home network (RustDesk, direct IP, no cloud account)
-$answer = Read-Host "להתקין גם שליטה מרחוק (RustDesk)? (y/n)"
+$rd = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+$answer = if (Test-Path $rd) { "n" } else { Read-Host "להתקין גם שליטה מרחוק (RustDesk)? (y/n)" }
 if ($answer -match '^(y|Y|כ)') {
-    $rd = "$env:ProgramFiles\RustDesk\rustdesk.exe"
     if (-not (Test-Path $rd)) {
         Write-Host "מתקין RustDesk..."
         # The latest MSI from RustDesk's GitHub releases (winget doesn't always find the package)
         $rel = Invoke-RestMethod "https://api.github.com/repos/rustdesk/rustdesk/releases/latest" -UseBasicParsing
         $msi = $rel.assets | Where-Object { $_.name -like "*x86_64*.msi" } | Select-Object -First 1
         if ($msi) {
-            Invoke-WebRequest $msi.browser_download_url -OutFile "$tmp\rustdesk.msi" -UseBasicParsing
-            Start-Process msiexec.exe -ArgumentList "/i `"$tmp\rustdesk.msi`" /qn" -Wait
+            Invoke-WebRequest $msi.browser_download_url -OutFile "$env:TEMP\rustdesk.msi" -UseBasicParsing
+            Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\rustdesk.msi`" /qn" -Wait
         } else {
             winget install --id RustDesk.RustDesk --silent --accept-package-agreements --accept-source-agreements
         }
@@ -64,4 +117,3 @@ if ($answer -match '^(y|Y|כ)') {
     Write-Host ""
     Write-Host "שליטה מרחוק מוכנה. במחשב של אבא: RustDesk -> להקליד $ip (או $env:COMPUTERNAME) -> הסיסמה שבחרת."
 }
-Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
