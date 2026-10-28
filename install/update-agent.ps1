@@ -46,11 +46,12 @@ if ($sha -and $sha -ne $installed -and $sha -ne $staged) {
     }
 
 # 2. Install it. Restarting the agent cuts a running session for a few seconds, so the task waits until
-#    nobody (or a parent) is signed in, or the PC starts up. Run by hand, it installs right away.
+#    no kid is using approved time (locked, signed out or a parent), or the PC starts up.
+#    Run by hand, it installs right away.
 function Kid-Session {
     try {
         $st = Invoke-RestMethod "http://127.0.0.1:8765/state" -UseBasicParsing -TimeoutSec 5
-        return [bool]($st.user -and -not $st.exempt)
+        return [bool]($st.user -and -not $st.exempt -and $st.session)
     } catch { return $false }  # agent not running
 }
 if ((Test-Path "$pending\.sha") -and (-not $auto -or -not (Kid-Session))) {
