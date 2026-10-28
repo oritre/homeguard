@@ -43,6 +43,27 @@ def single_instance() -> bool:
     return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
 
 
+def ensure_desktop() -> None:
+    """At a kid's sign-in Windows starts this lock screen instead of the desktop (the agent sets it as the
+    account's shell), so the desktop never shows before approval. Open it once a session is approved,
+    or a parent is signed in, if it isn't running in this session yet."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    import os
+    import subprocess
+    sid = ctypes.c_ulong()
+    if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
+        return
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq explorer.exe", "/FI", f"SESSION eq {sid.value}",
+                              "/NH"], capture_output=True, text=True, creationflags=0x08000000, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    if "explorer.exe" not in out.lower():
+        subprocess.Popen([os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")])
+
+
 def virtual_screen(root: tk.Tk) -> tuple[int, int, int, int]:
     if sys.platform == "win32":
         import ctypes
@@ -338,6 +359,7 @@ class LockScreen:
         self.timer.deiconify()
         self.timer.update_idletasks()
         self.timer.geometry(f"+{w - self.timer.winfo_width() - 24}+12")
+        ensure_desktop()
 
     # ---------------------------------------------------------------- actions
     def login(self):
@@ -437,6 +459,7 @@ class LockScreen:
                 self.end_session("אין חיבור לשומר המחשב")
                 self.show_locked()
         elif st.get("exempt"):
+            ensure_desktop()
             self.root.destroy()  # a parent is logged in
             return
         else:

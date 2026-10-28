@@ -14,6 +14,7 @@ import json
 import logging
 import logging.handlers
 import os
+import socket
 import sys
 import threading
 import time
@@ -41,6 +42,8 @@ DEFAULT_CONFIG = {
     "lockscreen_timeout": 45,         # seconds without a lock-screen heartbeat before logoff
     "logon_grace": 120,               # seconds after a kid logs in before the watchdog acts
     "harden_kid_accounts": True,
+    "lock_as_shell": True,             # kids' sign-in starts the lock screen instead of the Windows desktop
+    "diag_upload": True,               # send the agent log to the server, for troubleshooting from afar
 }
 
 
@@ -61,6 +64,14 @@ class Agent:
         self.mode = "offline"
         self.hardened: set[str] = set()
         self.poll_lock = threading.Lock()
+        self.log_path = ""
+        self.signin_at = 0.0  # when the current kid signed in, until the lock screen first answers
+        app = os.path.dirname(os.path.abspath(__file__))
+        exe = sys.executable
+        if exe.lower().endswith("python.exe"):
+            exe = exe[:-len("python.exe")] + "pythonw.exe"
+        self.app_dir = app
+        self.lock_cmd = f'"{exe}" "{os.path.join(app, "lockscreen.pyw")}"'
 
     # ------------------------------------------------------------ server calls
     def _call(self, method: str, path: str, body: dict | None = None, params: dict | None = None):
@@ -144,7 +155,7 @@ class Agent:
             log.info("console user: %r -> %r", self.user, user)
             self.user, self.session_id, self.user_since = user, sid, time.time()
             if user and not self.is_exempt(user) and self.cfg["harden_kid_accounts"] and user not in self.hardened:
-                winctl.harden_user(user)
+                winctl.harden_user(user, self.lock_cmd if self.cfg["lock_as_shell"] else "")
                 self.hardened.add(user)
         self.session_id = sid
         st = self.server("GET", "/api/state", params={"pc": self.cfg["pc_name"], "user": user})
@@ -191,11 +202,6 @@ class Agent:
     def lockscreen_guard(self) -> None:
         """Bring the lock screen up within a second of a kid signing in, or of it being closed, so the
         Windows desktop isn't visible while waiting for the logon task (which re-runs only every minute)."""
-        app = os.path.dirname(os.path.abspath(__file__))
-        exe = sys.executable
-        if exe.lower().endswith("python.exe"):
-            exe = exe[:-len("python.exe")] + "pythonw.exe"
-        cmd = f'"{exe}" "{os.path.join(app, "lockscreen.pyw")}"'
         last_launch = 0.0
         seen = (None, "")
         retry_until = 0.0  # after a sign-in, keep trying for a while even if the heartbeat looks fresh
@@ -207,6 +213,9 @@ class Agent:
                 if (sid, user) != seen:
                     seen = (sid, user)
                     retry_until = now + 20  # the heartbeat may still be from the previous kid
+                    if user and not self.is_exempt(user):
+                        log.info("sign-in: %s (session %s)", user, sid)
+                        self.signin_at = now
                 if not user or self.is_exempt(user):
                     continue
                 if now >= retry_until and (now - self.last_heartbeat < 10 or now - last_launch < 8):
@@ -216,13 +225,95 @@ class Agent:
                 last_launch = now
                 log.info("starting the lock screen for %s", user)
                 # Right after sign-in Windows may not hand out the user's token yet; it tries again in a second
-                if winctl.launch_in_session(sid, cmd, app):
+                if winctl.launch_in_session(sid, self.lock_cmd, self.app_dir):
                     retry_until = 0.0
+                    log.info("lock screen process started")
             except Exception:
                 log.exception("lockscreen guard failed")
 
+    def network_watch(self) -> None:
+        """Log the Wi-Fi, firewall and real reachability whenever they change, so a "no internet" report
+        can be traced to its cause (Wi-Fi dropped, firewall still closed, names not resolving...)."""
+        last: dict = {}
+        last_test = ("", "")
+        tick = 0
+        while True:
+            try:
+                st = winctl.network_status(full=tick % 4 == 0)
+                if "windows" not in st and "windows" in last:
+                    st["windows"] = last["windows"]
+                if st != last:
+                    log.info("network: %s", "; ".join(f"{k}={v}" for k, v in st.items()))
+                    last = st
+                test = (self.mode, self.reachability()) if self.mode != "offline" else ("offline", "")
+                if test != last_test:
+                    if test[1]:
+                        log.info("internet check (mode %s): %s", *test)
+                    last_test = test
+            except Exception:
+                log.exception("network watch failed")
+            tick += 1
+            time.sleep(15)
+
+    @staticmethod
+    def reachability() -> str:
+        """Can this PC reach the internet right now? Name lookup and a connection, checked separately."""
+        out = []
+        try:
+            ip = socket.getaddrinfo("www.google.com", 443, socket.AF_INET)[0][4][0]
+            out.append("dns ok")
+        except OSError as e:
+            ip = ""
+            out.append(f"dns FAILED ({e})")
+        for name, addr in (("google", ip), ("1.1.1.1", "1.1.1.1")):
+            if not addr:
+                continue
+            try:
+                with socket.create_connection((addr, 443), timeout=4):
+                    out.append(f"{name} ok")
+            except OSError as e:
+                out.append(f"{name} FAILED ({e})")
+        return ", ".join(out)
+
+    def diag_upload(self) -> None:
+        """Send new lines of the agent log (and the auto-update log) to the server every half minute."""
+        base = os.path.dirname(self.log_path) if self.log_path else ""
+        pos = os.path.getsize(self.log_path) if self.log_path and os.path.exists(self.log_path) else 0
+        pos = max(0, pos - 200_000)  # start with recent history
+        update_mtime = 0.0
+        while True:
+            try:
+                text, new_pos = "", pos
+                if self.log_path and os.path.exists(self.log_path):
+                    size = os.path.getsize(self.log_path)
+                    if size < pos:  # rotated
+                        pos = 0
+                    with open(self.log_path, "rb") as f:
+                        f.seek(pos)
+                        text = f.read(250_000).decode("utf-8", "replace")
+                        new_pos = f.tell()
+                upd = os.path.join(base, "update.log")
+                if base and os.path.exists(upd) and os.path.getmtime(upd) != update_mtime:
+                    with open(upd, encoding="utf-8", errors="replace") as f:
+                        text += "---- update.log ----\n" + f.read(20_000) + "\n---- end update.log ----\n"
+                if text:
+                    # Straight to the server, not via server(): an older server without /api/diag
+                    # must not make the PC look offline.
+                    self._call("POST", "/api/diag", {"pc": self.cfg["pc_name"], "text": text})
+                    pos = new_pos
+                    if base and os.path.exists(upd):
+                        update_mtime = os.path.getmtime(upd)
+            except (urllib.error.URLError, OSError, ValueError):
+                pass  # the server is away or doesn't take diagnostics yet: try again later
+            except Exception:
+                log.exception("diag upload failed")
+            time.sleep(30)
+
     def local_state(self) -> dict:
         self.last_heartbeat = time.time()
+        if self.signin_at:
+            log.info("lock screen answered %.1fs after sign-in", self.last_heartbeat - self.signin_at)
+            self.signin_at = 0.0
         with self.lock:
             st = self.server_state or {}
         return {"user": self.user, "exempt": bool(self.user) and self.is_exempt(self.user),
@@ -241,6 +332,9 @@ class Agent:
         local = ThreadingHTTPServer(("127.0.0.1", self.cfg["local_port"]), make_local_handler(self))
         threading.Thread(target=local.serve_forever, daemon=True).start()
         threading.Thread(target=self.lockscreen_guard, daemon=True).start()
+        threading.Thread(target=self.network_watch, daemon=True).start()
+        if self.cfg["diag_upload"]:
+            threading.Thread(target=self.diag_upload, daemon=True).start()
         log.info("agent running for pc %s", self.cfg["pc_name"])
         last_dns_fix = time.time()
         while True:
@@ -339,7 +433,9 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "uninstall":
         winctl.restore_defaults()
         return
-    Agent(cfg).run()
+    agent = Agent(cfg)
+    agent.log_path = handler.baseFilename
+    agent.run()
 
 
 if __name__ == "__main__":

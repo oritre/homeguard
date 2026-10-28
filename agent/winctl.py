@@ -156,8 +156,10 @@ def user_sid(username: str) -> str | None:
     return value
 
 
-def harden_user(username: str) -> None:
-    """Disable Task Manager and Win-key shortcuts for a kid's Windows account."""
+def harden_user(username: str, shell: str = "") -> None:
+    """Disable Task Manager and Win-key shortcuts for a kid's Windows account. With `shell`, that program
+    starts instead of the Windows desktop at sign-in (the lock screen, which opens the desktop once a
+    parent approves), so the desktop never shows before the lock screen. Takes effect from the next sign-in."""
     sid = user_sid(username)
     if not sid:
         return
@@ -170,8 +172,41 @@ def harden_user(username: str) -> None:
             with winreg.CreateKey(winreg.HKEY_USERS, sid + path) as k:
                 for name, val in values.items():
                     winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, val)
+        with winreg.CreateKey(winreg.HKEY_USERS, sid + SHELL_KEY) as k:
+            if shell:
+                winreg.SetValueEx(k, "Shell", 0, winreg.REG_SZ, shell)
+            else:
+                try:
+                    winreg.DeleteValue(k, "Shell")
+                except FileNotFoundError:
+                    pass
     except OSError as e:
         log.warning("harden %s failed: %s", username, e)
+
+
+SHELL_KEY = r"\Software\Microsoft\Windows\CurrentVersion\Policies\System"
+
+
+def network_status(full: bool = False) -> dict:
+    """What the network looks like right now, for the diagnostics log."""
+    if not IS_WIN:
+        return {}
+    st = {}
+    for line in run(["netsh", "wlan", "show", "interfaces"]).splitlines():
+        k, _, v = line.partition(":")
+        k = k.strip().lower()
+        if k in ("state", "ssid", "signal", "radio type"):
+            st["wifi " + k] = v.strip()
+    for line in run(["netsh", "advfirewall", "show", "currentprofile"]).splitlines():
+        if line.lower().startswith("firewall policy"):
+            st["firewall"] = line.split()[-1]
+    if full:
+        st["windows"] = powershell(
+            "(Get-NetConnectionProfile | ForEach-Object { $_.Name + '=' + $_.IPv4Connectivity }) -join ', '; "
+            "(Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | "
+            "ForEach-Object { $_.InterfaceAlias + ' dns ' + ($_.ServerAddresses -join '/') }) -join ', '"
+        ).strip().replace("\r", "").replace("\n", " | ")
+    return st
 
 
 # ------------------------------------------------------------------- firewall

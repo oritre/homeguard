@@ -318,6 +318,21 @@ class ServerTest(unittest.TestCase):
         self.assertIn("scratch.mit.edu", self.hg.state("salon")["allowlist"])
         self.assertIsNotNone(self.db.site_rows("allow")[0]["expires"])
 
+    def test_diag_log_is_kept_per_pc_and_trimmed(self):
+        self.hg.save_diag("סידלי רדח", "line 1")
+        self.hg.save_diag("סידלי רדח", "line 2\n")
+        res = self.hg.read_diag("סידלי רדח", 10)
+        self.assertEqual(res["text"], "line 1\nline 2\n")
+        self.assertEqual(res["pcs"], ["סידלי_רדח"])
+        self.assertEqual(self.hg.read_diag("", 10)["text"], "")
+        self.hg.DIAG_MAX = 1000
+        for i in range(100):
+            self.hg.save_diag("salon", f"event number {i:03d}")
+        text = self.hg.read_diag("salon", 100)["text"]
+        self.assertLessEqual(len(text), 1000)
+        self.assertTrue(text.startswith("event number"))
+        self.assertTrue(text.endswith("event number 099\n"))
+
     def test_old_database_is_migrated(self):
         import sqlite3
         path = os.path.join(self.tmp, "old")
