@@ -47,12 +47,12 @@ object AppControl {
         return if (pkg == null || pkg == "android") "com.android.chrome" else pkg // "android" = chooser
     }
 
-    /** Packages we never suspend: ourselves, the system UI and the launchers. */
+    /** Packages we never suspend: ourselves, the system UI, the launchers and the parents' remote control. */
     private fun untouchable(ctx: Context): Set<String> {
         val pm = ctx.packageManager
         val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
         return pm.queryIntentActivities(home, 0).map { it.activityInfo.packageName }.toSet() +
-            setOf(ctx.packageName, "com.android.systemui")
+            setOf(ctx.packageName, "com.android.systemui") + FilterVpn.REMOTE_APPS
     }
 
     private var launchableCache: Set<String> = emptySet()

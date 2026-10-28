@@ -691,6 +691,19 @@ class AgentEndToEnd(unittest.TestCase):
         self.agent.dns_answer("he.wikipedia.org", resp)  # not an exception
         self.assertEqual(allowed, [[], ["185.199.108.153"]])
 
+    def test_windows_internet_check_passes_when_offline(self):
+        """Windows drops the Wi-Fi when its connectivity check fails, so it gets through while locked."""
+        allowed = []
+        orig = homeguard_agent.winctl.allow_ips
+        homeguard_agent.winctl.allow_ips = lambda ips: allowed.append(list(ips))
+        self.addCleanup(setattr, homeguard_agent.winctl, "allow_ips", orig)
+        self.agent.poll_once()  # locked, no always-open sites
+        self.assertTrue(self.agent.dns_decide("www.msftconnecttest.com"))
+        resp = (struct.pack(">HHHHHH", 1, 0x8180, 1, 1, 0, 0) + dns_query("www.msftconnecttest.com")[12:] +
+                b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + bytes([23, 1, 2, 3]))
+        self.agent.dns_answer("www.msftconnecttest.com", resp)
+        self.assertEqual(allowed, [["23.1.2.3"]])
+
     def test_master_login_opens_dns_immediately(self):
         self.hg.db.add_kid("hagit", "pw12", "חגית", "master")
         self.agent.poll_once()
