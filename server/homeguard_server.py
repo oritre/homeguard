@@ -722,6 +722,41 @@ class HomeGuard:
 
     ACTIVITY_EVERY = 10 * 60  # at most one "used while locked" alert per device in this many seconds
 
+    # ---- diagnostics: each PC uploads its agent log, so problems can be read from here
+    DIAG_MAX = 2_000_000
+
+    def _diag_dir(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(self.cfg["db"])), "diag")
+
+    def _diag_path(self, pc: str) -> str:
+        return os.path.join(self._diag_dir(), (re.sub(r"[^\w\-]", "_", pc)[:60] or "pc") + ".log")
+
+    def save_diag(self, pc: str, text: str) -> None:
+        if not text:
+            return
+        os.makedirs(self._diag_dir(), exist_ok=True)
+        path = self._diag_path(pc)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text if text.endswith("\n") else text + "\n")
+        if os.path.getsize(path) > self.DIAG_MAX:  # keep the newest half
+            with open(path, encoding="utf-8", errors="replace") as f:
+                f.seek(os.path.getsize(path) - self.DIAG_MAX // 2)
+                tail = f.read()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(tail[tail.find("\n") + 1:])
+
+    def read_diag(self, pc: str, kb: int) -> dict:
+        d = self._diag_dir()
+        pcs = sorted(n[:-4] for n in os.listdir(d) if n.endswith(".log")) if os.path.isdir(d) else []
+        path = self._diag_path(pc) if pc else ""
+        if not path or not os.path.exists(path):
+            return {"pcs": pcs, "text": ""}
+        size = os.path.getsize(path)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            f.seek(max(0, size - kb * 1024))
+            text = f.read()
+        return {"pcs": pcs, "text": text if size <= kb * 1024 else text[text.find("\n") + 1:]}
+
     def report_activity(self, pc: str, what: str) -> dict:
         """The device says it's being used although it should be locked. Tell the parents."""
         now = time.time()
@@ -1644,6 +1679,9 @@ def make_handler(hg: HomeGuard):
             elif method == "GET" and path == "/admin/api/history":
                 count = int(qs["count"]) if qs.get("count", "").isdigit() else 50
                 self._admin_json(200, {"events": hg.web.history(max(1, min(count, 500)))})
+            elif method == "GET" and path == "/admin/api/diag":
+                kb = int(qs["kb"]) if qs.get("kb", "").isdigit() else 200
+                self._admin_json(200, hg.read_diag(qs.get("pc", ""), max(1, min(kb, 2000))))
             elif method == "GET" and path == "/admin/api/tokens":
                 self._admin_json(200, {"tokens": hg.web.tokens(sess["id"])})
             elif method == "POST" and path == "/admin/api/logout":
@@ -1718,6 +1756,9 @@ def make_handler(hg: HomeGuard):
                 self._send(200, hg.report_apps(pc, apps if isinstance(apps, list) else []))
             elif path == "/api/activity":
                 self._send(200, hg.report_activity(pc, str(body.get("what", ""))))
+            elif path == "/api/diag":
+                hg.save_diag(pc, str(body.get("text", ""))[:300_000])
+                self._send(200, {"ok": True})
             elif path == "/api/notice":
                 hg.notify(str(body.get("text", ""))[:500] or f"הודעה מ-{pc}")
                 self._send(200, {"ok": True})
