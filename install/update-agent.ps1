@@ -39,7 +39,15 @@ if ($answer -match '^(y|Y|כ)') {
     $rd = "$env:ProgramFiles\RustDesk\rustdesk.exe"
     if (-not (Test-Path $rd)) {
         Write-Host "מתקין RustDesk..."
-        winget install --id RustDesk.RustDesk --scope machine --silent --accept-package-agreements --accept-source-agreements
+        # The latest MSI from RustDesk's GitHub releases (winget doesn't always find the package)
+        $rel = Invoke-RestMethod "https://api.github.com/repos/rustdesk/rustdesk/releases/latest" -UseBasicParsing
+        $msi = $rel.assets | Where-Object { $_.name -like "*x86_64*.msi" } | Select-Object -First 1
+        if ($msi) {
+            Invoke-WebRequest $msi.browser_download_url -OutFile "$tmp\rustdesk.msi" -UseBasicParsing
+            Start-Process msiexec.exe -ArgumentList "/i `"$tmp\rustdesk.msi`" /qn" -Wait
+        } else {
+            winget install --id RustDesk.RustDesk --silent --accept-package-agreements --accept-source-agreements
+        }
         Start-Sleep 10
     }
     if (-not (Test-Path $rd)) { throw "RustDesk לא הותקן. נסו שוב או התקינו מ-rustdesk.com" }
