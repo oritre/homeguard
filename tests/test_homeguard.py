@@ -556,6 +556,12 @@ class DnsTest(unittest.TestCase):
         self.assertFalse(dnsfilter.is_allowed("other.github.io", "full", allow, block, always))
         self.assertFalse(dnsfilter.is_allowed("wikipedia.org", "offline", allow, block, always))
 
+    def test_update_hosts_resolve_when_offline_only(self):
+        self.assertTrue(dnsfilter.is_allowed("api.github.com", "offline", [], []))
+        self.assertTrue(dnsfilter.is_allowed("codeload.github.com.", "offline", [], []))
+        self.assertFalse(dnsfilter.is_allowed("gist.github.com", "offline", [], []))
+        self.assertFalse(dnsfilter.is_allowed("github.com", "allowlist", [], []))
+
     def test_answer_ips(self):
         q = dns_query("oritre.github.io")
         hdr = struct.pack(">HHHHHH", 0x1234, 0x8180, 1, 3, 0, 0)

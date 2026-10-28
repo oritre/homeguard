@@ -187,6 +187,12 @@ def firewall_setup(server_ip: str, upstream_dns: str) -> None:
          "action=allow", f"remoteip={server_ip}", "enable=yes"])
     run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-LAN", "dir=out",
          "action=allow", "remoteip=LocalSubnet", "enable=yes"])
+    # Auto-update: SYSTEM's PowerShell (the "HomeGuard Update" task) reaches GitHub with the internet off.
+    powershell(
+        f"Remove-NetFirewallRule -Name {RULE_PREFIX}-Update -ErrorAction SilentlyContinue; "
+        f"New-NetFirewallRule -Name {RULE_PREFIX}-Update -DisplayName {RULE_PREFIX}-Update -Direction Outbound "
+        "-Action Allow -Program \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
+        "-LocalUser 'D:(A;;CC;;;SY)' | Out-Null")
     # Name lookups keep working with the internet off, so always-open sites can be found.
     for proto in ("UDP", "TCP"):
         run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-DNS", "dir=out",
@@ -222,7 +228,7 @@ def flush_dns() -> None:
 def restore_defaults() -> None:
     """Used by the uninstaller."""
     internet(True)
-    for name in ("Server", "LAN", "DNS", "Always"):
+    for name in ("Server", "LAN", "DNS", "Always", "Update"):
         run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-{name}"])
     powershell("Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex "
                "-ResetServerAddresses }")
