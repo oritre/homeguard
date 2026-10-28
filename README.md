@@ -64,6 +64,14 @@ powershell -ExecutionPolicy Bypass -File install\install-agent.ps1 `
 
 **חובה:** חשבון ה-Windows של הילדים הוא **Standard user** (לא Administrator). אפשר חשבון אחד משותף לכל הילדים, כי הזיהוי נעשה במסך הנעילה.
 
+**עדכון סוכן קיים** (PowerShell כמנהל על מחשב הילדים; שואל גם אם להתקין RustDesk לשליטה מרחוק ברשת הביתית):
+```powershell
+irm https://raw.githubusercontent.com/oritre/homeguard/main/install/update-agent.ps1 | iex
+```
+הסוכן מכבה ב-Windows את "ניתוק רך" של ה-Wi-Fi ומשאיר את בדיקת האינטרנט של Windows (msftconnecttest.com) פתוחה גם בנעילה,
+אחרת Windows מנתק את ה-Wi-Fi כשהאינטרנט חסום. מסך הנעילה מופעל ע"י הסוכן תוך שנייה מכניסה או מסגירה.
+בטאבלט, RustDesk (`com.carriez.flutter_hbb`) לא מושעה ולא עובר דרך ה-VPN, כדי שאפשר יהיה לשלוט בו גם כשהוא נעול.
+
 הסרה: `install\uninstall-agent.ps1` מחזיר את חומת האש וה-DNS לברירת המחדל.
 
 ## ממשק ניהול באינטרנט

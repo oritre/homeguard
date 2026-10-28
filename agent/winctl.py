@@ -24,6 +24,11 @@ if IS_WIN:
         wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
         ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD)]
     _wtsapi.WTSLogoffSession.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL]
+    _wtsapi.WTSQueryUserToken.argtypes = [wintypes.ULONG, ctypes.POINTER(wintypes.HANDLE)]
+    _advapi.CreateProcessAsUserW.argtypes = [
+        wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL,
+        wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p]
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 
 def run(cmd: list[str]) -> str:
@@ -60,6 +65,70 @@ def console_session() -> tuple[int | None, str]:
     name = buf.value or ""
     _wtsapi.WTSFreeMemory(buf)
     return sid, name
+
+
+def launch_in_session(session_id: int, cmdline: str, cwd: str) -> bool:
+    """Start a program on a user's desktop (the agent runs as SYSTEM). Used to bring the lock screen up
+    the moment a kid signs in, instead of waiting for the logon task, which can take several seconds."""
+    if not IS_WIN or session_id is None:
+        log.info("[dry-run] launch in session %s: %s", session_id, cmdline)
+        return False
+
+    class STARTUPINFO(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR), ("lpDesktop", wintypes.LPWSTR),
+                    ("lpTitle", wintypes.LPWSTR), ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD), ("dwXCountChars", wintypes.DWORD),
+                    ("dwYCountChars", wintypes.DWORD), ("dwFillAttribute", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+    token = wintypes.HANDLE()
+    if not _wtsapi.WTSQueryUserToken(wintypes.ULONG(session_id), ctypes.byref(token)):
+        log.warning("WTSQueryUserToken(%s) failed: %s", session_id, ctypes.get_last_error())
+        return False
+    env = ctypes.c_void_p()
+    try:
+        if not userenv.CreateEnvironmentBlock(ctypes.byref(env), token, False):
+            env = ctypes.c_void_p()
+        si = STARTUPINFO()
+        si.cb = ctypes.sizeof(si)
+        si.lpDesktop = "winsta0\\default"
+        pi = PROCESS_INFORMATION()
+        flags = 0x00000400 | NO_WINDOW  # CREATE_UNICODE_ENVIRONMENT
+        ok = _advapi.CreateProcessAsUserW(token, None, ctypes.create_unicode_buffer(cmdline), None, None, False,
+                                          flags, env, cwd, ctypes.byref(si), ctypes.byref(pi))
+        if not ok:
+            log.warning("CreateProcessAsUser failed: %s", ctypes.get_last_error())
+            return False
+        _kernel32.CloseHandle(pi.hThread)
+        _kernel32.CloseHandle(pi.hProcess)
+        return True
+    finally:
+        if env:
+            userenv.DestroyEnvironmentBlock(env)
+        _kernel32.CloseHandle(token)
+
+
+def keep_wifi_connected() -> None:
+    """With the internet blocked Windows may decide the Wi-Fi is useless and drop it (or hop to another
+    saved network). Turn off that 'soft disconnect'."""
+    if not IS_WIN:
+        log.info("[dry-run] keep wifi connected")
+        return
+    import winreg
+    try:
+        with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE,
+                              r"SOFTWARE\Policies\Microsoft\Windows\WcmSvc\GroupPolicy") as k:
+            winreg.SetValueEx(k, "fMinimizeConnections", 0, winreg.REG_DWORD, 0)
+            winreg.SetValueEx(k, "fSoftDisconnectConnections", 0, winreg.REG_DWORD, 0)
+    except OSError as e:
+        log.warning("wifi policy failed: %s", e)
 
 
 def logoff(session_id: int) -> None:

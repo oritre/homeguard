@@ -114,12 +114,13 @@ class Agent:
 
     def dns_answer(self, domain: str, response: bytes) -> None:
         """Internet off (firewall blocks everything): let through the addresses of always-open sites,
-        before the browser gets the answer and connects."""
+        before the browser gets the answer and connects. Windows' own "is there internet" check
+        (msftconnecttest.com) is let through too: when it fails, Windows drops the Wi-Fi."""
         with self.lock:
             always = (self.server_state or {}).get("alwayslist", [])
-            if self.mode != "offline" or not always:
+            if self.mode != "offline":
                 return
-            if not dnsfilter.matches(domain, dnsfilter.expand_allowlist(always)):
+            if not dnsfilter.matches(domain, dnsfilter.expand_allowlist(always)):  # includes ESSENTIAL
                 return
             new = [ip for ip in dnsfilter.answer_ips(response) if ip not in self.always_ips]
             if not new:
@@ -187,6 +188,29 @@ class Agent:
             winctl.logoff(self.session_id)
             self.user_since = now  # don't hammer while the logoff happens
 
+    def lockscreen_guard(self) -> None:
+        """Bring the lock screen up within a second of a kid signing in, or of it being closed, so the
+        Windows desktop isn't visible while waiting for the logon task (which re-runs only every minute)."""
+        app = os.path.dirname(os.path.abspath(__file__))
+        exe = sys.executable
+        if exe.lower().endswith("python.exe"):
+            exe = exe[:-len("python.exe")] + "pythonw.exe"
+        cmd = f'"{exe}" "{os.path.join(app, "lockscreen.pyw")}"'
+        last_launch = 0.0
+        while True:
+            time.sleep(0.5)
+            try:
+                sid, user = winctl.console_session()
+                now = time.time()
+                if (not user or self.is_exempt(user) or now - self.last_heartbeat < 6
+                        or now - last_launch < 8):
+                    continue
+                last_launch = now
+                log.info("lock screen not answering for %s, starting it", user)
+                winctl.launch_in_session(sid, cmd, app)
+            except Exception:
+                log.exception("lockscreen guard failed")
+
     def local_state(self) -> dict:
         self.last_heartbeat = time.time()
         with self.lock:
@@ -197,6 +221,7 @@ class Agent:
 
     def run(self) -> None:
         server_ip = urlparse(self.cfg["server_url"]).hostname or ""
+        winctl.keep_wifi_connected()
         winctl.firewall_setup(server_ip, self.cfg["upstream_dns"])
         winctl.internet(False)
         self.applied_internet = False
@@ -205,6 +230,7 @@ class Agent:
         dns.start()
         local = ThreadingHTTPServer(("127.0.0.1", self.cfg["local_port"]), make_local_handler(self))
         threading.Thread(target=local.serve_forever, daemon=True).start()
+        threading.Thread(target=self.lockscreen_guard, daemon=True).start()
         log.info("agent running for pc %s", self.cfg["pc_name"])
         last_dns_fix = time.time()
         while True:

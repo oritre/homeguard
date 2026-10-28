@@ -35,6 +35,8 @@ class FilterVpn : VpnService() {
         @Volatile var always: List<String> = emptyList()
         /** "Works even without internet" apps: left outside the tunnel, so they always have their own internet. */
         @Volatile var bypassApps: Set<String> = emptySet()
+        /** RustDesk, so a parent can take over the tablet from home even while it's locked. */
+        val REMOTE_APPS = setOf("com.carriez.flutter_hbb")
         @Volatile var upstream = "1.1.1.3"
         @Volatile var running = false
         @Volatile var instance: FilterVpn? = null
@@ -67,7 +69,7 @@ class FilterVpn : VpnService() {
         try {
             b.addDisallowedApplication(packageName) // our own app always reaches the server
         } catch (e: Exception) { Log.w(TAG, "disallow self", e) }
-        for (pkg in bypassApps) {
+        for (pkg in bypassApps + REMOTE_APPS) {
             try { b.addDisallowedApplication(pkg) } catch (e: Exception) { Log.w(TAG, "bypass $pkg", e) }
         }
         if (wantAll) {
