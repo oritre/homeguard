@@ -26,6 +26,9 @@ DEPENDENCIES = {
 }
 # Always resolvable, so Windows doesn't show "no internet" and keeps the clock right.
 ESSENTIAL = ["msftconnecttest.com", "msftncsi.com", "time.windows.com"]
+# The agent's auto-update (install/update-agent.ps1) reads these while the internet is off. They resolve,
+# but only SYSTEM's PowerShell may connect (firewall rule HomeGuard-Update), so a kid's browser still can't.
+UPDATE_HOSTS = {"api.github.com", "github.com", "codeload.github.com"}
 
 
 def matches(domain: str, patterns) -> bool:
@@ -54,7 +57,7 @@ def is_allowed(domain: str, mode: str, allow: list[str], block: list[str], alway
     if always and matches(domain, expand_allowlist(list(always))):
         return True
     if mode == "offline":
-        return matches(domain, ESSENTIAL)
+        return matches(domain, ESSENTIAL) or domain.lower().rstrip(".") in UPDATE_HOSTS
     if matches(domain, block):
         return False
     if mode == "allowlist":
