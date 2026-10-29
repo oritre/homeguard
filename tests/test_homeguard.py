@@ -818,6 +818,32 @@ class AgentEndToEnd(unittest.TestCase):
         self.agent.poll_once()
         self.assertEqual(self.logoffs, [1])
 
+    def test_home_wifi_is_learned_and_rejoined(self):
+        w = homeguard_agent.winctl
+        for name in ("wifi_profiles", "connected_networks", "wifi_set_auto", "wifi_connect"):
+            self.addCleanup(setattr, w, name, getattr(w, name))
+        w.wifi_profiles = lambda: [("home5", "manual"), ("neighbour", "manual")]
+        w.connected_networks = lambda: ["home5"]
+        autos, joins = [], []
+        w.wifi_set_auto = autos.append
+        w.wifi_connect = lambda name: joins.append(name) or "0"
+        tmp = tempfile.mkdtemp()
+        self.agent.log_path = os.path.join(tmp, "agent.log")
+        self.agent.learn_home_wifi()
+        self.assertEqual(self.agent.home_wifi, ["home5"])
+        self.assertEqual(autos, ["home5"])
+        with open(os.path.join(tmp, "home_wifi.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), ["home5"])
+        # Only the home network is rejoined, never the neighbour's.
+        self.agent.rejoin_wifi(0, 10)
+        self.agent.rejoin_wifi(1, 26)
+        self.assertEqual(joins, ["home5", "home5"])
+        # A fresh start remembers it.
+        fresh = homeguard_agent.Agent(dict(self.agent.cfg))
+        fresh.log_path = self.agent.log_path
+        fresh.load_home_wifi()
+        self.assertEqual(fresh.home_wifi, ["home5"])
+
     def test_server_down_keeps_counting_locally(self):
         res = self.local_call("POST", "/login", {"username": "noam", "password": "1234"})
         self.hg.decide(f"ap:{res['request_id']}:full:30", "אורי")
