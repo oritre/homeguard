@@ -129,6 +129,15 @@ def keep_wifi_connected() -> None:
             winreg.SetValueEx(k, "fSoftDisconnectConnections", 0, winreg.REG_DWORD, 0)
     except OSError as e:
         log.warning("wifi policy failed: %s", e)
+    # The Wi-Fi also dropped by itself with the internet open: stop Windows powering the adapter down.
+    out = powershell(
+        "Get-NetAdapter -Physical | Where-Object { $_.NdisPhysicalMedium -eq 9 } | ForEach-Object { "
+        "$pm = Get-NetAdapterPowerManagement -Name $_.Name; "
+        "if ($pm.AllowComputerToTurnOffDevice -ne 'Disabled') { "
+        "Set-NetAdapterPowerManagement -Name $_.Name -AllowComputerToTurnOffDevice Disabled -NoRestart; "
+        "$_.InterfaceDescription + ': power saving turned off' } }").strip()
+    if out:
+        log.info("wifi %s", out.replace("\r", "").replace("\n", "; "))
 
 
 def wifi_profiles() -> list[tuple[str, str]]:
