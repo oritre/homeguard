@@ -29,6 +29,11 @@ if IS_WIN:
         wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL,
         wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p]
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _ntdll = ctypes.WinDLL("ntdll")
+    _ntdll.NtSuspendProcess.argtypes = [wintypes.HANDLE]
+    _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    _wtsapi.WTSDisconnectSession.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL]
 
 
 def run(cmd: list[str]) -> str:
@@ -190,6 +195,133 @@ def logoff(session_id: int) -> None:
     log.warning("logging off session %s", session_id)
     if IS_WIN and session_id is not None:
         _wtsapi.WTSLogoffSession(None, session_id, False)
+
+
+def disconnect(session_id: int) -> None:
+    """Back to the Windows sign-in screen, leaving the user's session (and open programs) in place."""
+    log.info("switching user: disconnecting session %s", session_id)
+    if IS_WIN and session_id is not None:
+        _wtsapi.WTSDisconnectSession(None, session_id, False)
+
+
+def sessions() -> dict[int, str]:
+    """Signed-in Windows sessions, {session id: user name}, connected or not."""
+    if not IS_WIN:
+        return {}
+
+    class WTS_SESSION_INFOW(ctypes.Structure):
+        _fields_ = [("SessionId", wintypes.DWORD), ("pWinStationName", wintypes.LPWSTR), ("State", ctypes.c_int)]
+
+    buf = ctypes.POINTER(WTS_SESSION_INFOW)()
+    count = wintypes.DWORD()
+    if not _wtsapi.WTSEnumerateSessionsW(None, 0, 1, ctypes.byref(buf), ctypes.byref(count)):
+        return {}
+    ids = [buf[i].SessionId for i in range(count.value)]
+    _wtsapi.WTSFreeMemory(buf)
+    out = {}
+    for sid in ids:
+        name = wintypes.LPWSTR()
+        size = wintypes.DWORD()
+        if _wtsapi.WTSQuerySessionInformationW(None, sid, 5, ctypes.byref(name), ctypes.byref(size)):
+            if name.value:
+                out[sid] = name.value
+            _wtsapi.WTSFreeMemory(name)
+    return out
+
+
+def session_processes(session_id: int, username: str) -> list[tuple[int, str]]:
+    """(pid, program name) of everything `username` runs in that session."""
+    want = user_sid(username)
+    if not IS_WIN or not want:
+        return []
+
+    class WTS_PROCESS_INFOW(ctypes.Structure):
+        _fields_ = [("SessionId", wintypes.DWORD), ("ProcessId", wintypes.DWORD),
+                    ("pProcessName", wintypes.LPWSTR), ("pUserSid", ctypes.c_void_p)]
+
+    buf = ctypes.POINTER(WTS_PROCESS_INFOW)()
+    count = wintypes.DWORD()
+    if not _wtsapi.WTSEnumerateProcessesW(None, 0, 1, ctypes.byref(buf), ctypes.byref(count)):
+        return []
+    out = []
+    try:
+        for i in range(count.value):
+            p = buf[i]
+            if p.SessionId != session_id or not p.pUserSid:
+                continue
+            s = wintypes.LPWSTR()
+            if _advapi.ConvertSidToStringSidW(ctypes.c_void_p(p.pUserSid), ctypes.byref(s)):
+                same = s.value == want
+                _kernel32.LocalFree(s)
+                if same:
+                    out.append((p.ProcessId, p.pProcessName or ""))
+    finally:
+        _wtsapi.WTSFreeMemory(buf)
+    return out
+
+
+def suspend(pid: int, resume: bool = False) -> bool:
+    """Freeze (or unfreeze) a whole program: it keeps its windows and work, but runs nothing, plays
+    nothing and uses no network until it is unfrozen."""
+    if not IS_WIN:
+        return False
+    h = _kernel32.OpenProcess(0x0800, False, pid)  # PROCESS_SUSPEND_RESUME
+    if not h:
+        return False
+    try:
+        fn = _ntdll.NtResumeProcess if resume else _ntdll.NtSuspendProcess
+        return fn(h) == 0
+    finally:
+        _kernel32.CloseHandle(h)
+
+
+def ensure_kid_account(username: str, display: str) -> bool:
+    """A standard Windows account without a password for a kid (HomeGuard's approval is the lock).
+    Returns True when it was created now."""
+    if not IS_WIN or not username.isascii() or not username.replace("_", "").replace("-", "").isalnum():
+        return False
+    disp = display.replace("'", "''")
+    out = powershell(
+        f"if (-not (Get-LocalUser -Name '{username}' -ErrorAction SilentlyContinue)) {{ "
+        f"New-LocalUser -Name '{username}' -FullName '{disp}' -NoPassword -UserMayNotChangePassword "
+        f"-AccountNeverExpires | Out-Null; "
+        f"Set-LocalUser -Name '{username}' -PasswordNeverExpires $true; "
+        f"Add-LocalGroupMember -SID 'S-1-5-32-545' -Member '{username}' -ErrorAction SilentlyContinue; "
+        f"'created' }}")
+    return "created" in out
+
+
+def is_admin(username: str) -> bool:
+    """Member of the local Administrators group (a parent's account)."""
+    if not IS_WIN or not username:
+        return False
+    # By the group's SID: its name depends on the Windows language. (Get-LocalGroupMember breaks on
+    # leftover accounts, ADSI doesn't.)
+    out = powershell(
+        "$g = (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544').Translate("
+        "[System.Security.Principal.NTAccount]).Value.Split('\\')[-1]; "
+        "([ADSI]('WinNT://./' + $g + ',group')).psbase.Invoke('Members') | ForEach-Object { "
+        "$_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null) }")
+    return username.lower() in {n.strip().lower() for n in out.splitlines()}
+
+
+def unharden_user(username: str) -> None:
+    """Undo harden_user: a parent's account gets the normal desktop, Task Manager and Win-key shortcuts."""
+    sid = user_sid(username)
+    if not sid:
+        return
+    import winreg
+    for path, names in ((r"\Software\Microsoft\Windows\CurrentVersion\Policies\System", ("DisableTaskMgr", "Shell")),
+                        (r"\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", ("NoWinKeys",))):
+        try:
+            with winreg.OpenKey(winreg.HKEY_USERS, sid + path, 0, winreg.KEY_SET_VALUE) as k:
+                for name in names:
+                    try:
+                        winreg.DeleteValue(k, name)
+                    except FileNotFoundError:
+                        pass
+        except OSError:
+            pass
 
 
 def user_sid(username: str) -> str | None:
