@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import time
 import sys
-import threading
 import tkinter as tk
 import urllib.request
 
@@ -63,48 +62,6 @@ def ensure_desktop() -> None:
         out = ""
     if "explorer.exe" not in out.lower():
         subprocess.Popen([os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")])
-
-
-# Windows' own parts of a signed-in session, plus RustDesk (remote help) and this lock screen's Python.
-KEEP_RUNNING = {
-    "explorer.exe", "sihost.exe", "svchost.exe", "ctfmon.exe", "conhost.exe", "runtimebroker.exe",
-    "taskhostw.exe", "dllhost.exe", "dwm.exe", "fontdrvhost.exe", "searchhost.exe", "searchapp.exe",
-    "searchui.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe", "textinputhost.exe",
-    "lockapp.exe", "smartscreen.exe", "securityhealthsystray.exe", "applicationframehost.exe",
-    "useroobebroker.exe", "onedrive.exe", "rustdesk.exe", "pythonw.exe", "python.exe", "tasklist.exe", "taskkill.exe",
-}
-
-
-def stop_apps() -> None:
-    """When a session ends, close everything the kid left running (music, videos, games), so nothing
-    keeps playing behind the lock screen. Runs as the kid, so it can only touch the kid's own programs."""
-    if sys.platform != "win32":
-        return
-    import csv
-    import ctypes
-    import os
-    import subprocess
-    sid = ctypes.c_ulong()
-    if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
-        return
-    user = f"{os.environ.get('USERDOMAIN', '')}\\{os.environ.get('USERNAME', '')}"
-    try:
-        out = subprocess.run(["tasklist", "/FI", f"SESSION eq {sid.value}", "/FI", f"USERNAME eq {user}",
-                              "/FO", "CSV", "/NH"], capture_output=True, text=True, creationflags=0x08000000,
-                             timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
-        return
-    pids = [row[1] for row in csv.reader(out.splitlines())
-            if len(row) > 1 and row[1].isdigit() and row[0].lower() not in KEEP_RUNNING
-            and int(row[1]) != os.getpid()]
-    for i in range(0, len(pids), 20):
-        args = ["taskkill", "/F"]
-        for pid in pids[i:i + 20]:
-            args += ["/PID", pid]
-        try:
-            subprocess.run(args, capture_output=True, creationflags=0x08000000, timeout=20)
-        except (OSError, subprocess.SubprocessError):
-            pass
 
 
 def virtual_screen(root: tk.Tk) -> tuple[int, int, int, int]:
@@ -528,7 +485,6 @@ class LockScreen:
 
     def end_session(self, why: str):
         self.lock_reason = f"{why} ({time.strftime('%H:%M')})"
-        threading.Thread(target=stop_apps, daemon=True).start()
 
     def update_timer(self, session: dict, extend_pending: bool):
         self.remaining = 10 ** 9 if session.get("unlimited") else session["remaining"]
