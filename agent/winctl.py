@@ -192,16 +192,13 @@ def network_status(full: bool = False) -> dict:
     if not IS_WIN:
         return {}
     st = {}
-    for line in run(["netsh", "wlan", "show", "interfaces"]).splitlines():
-        k, _, v = line.partition(":")
-        k = k.strip().lower()
-        if k in ("state", "ssid", "signal", "radio type"):
-            st["wifi " + k] = v.strip()
     for line in run(["netsh", "advfirewall", "show", "currentprofile"]).splitlines():
         if line.lower().startswith("firewall policy"):
             st["firewall"] = line.split()[-1]
     if full:
         st["windows"] = powershell(
+            "(Get-NetAdapter | Where-Object { $_.Status -ne 'Disabled' } | ForEach-Object { "
+            "$_.Name + ' ' + $_.Status }) -join ', '; "
             "(Get-NetConnectionProfile | ForEach-Object { $_.Name + '=' + $_.IPv4Connectivity }) -join ', '; "
             "(Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | "
             "ForEach-Object { $_.InterfaceAlias + ' dns ' + ($_.ServerAddresses -join '/') }) -join ', '"
@@ -216,8 +213,13 @@ RULE_PREFIX = "HomeGuard"
 
 def firewall_setup(server_ip: str, upstream_dns: str) -> None:
     """Allow rules that stay in place while outbound traffic is blocked."""
-    for name in ("Server", "LAN", "DNS"):
+    for name in ("Server", "LAN", "DNS", "DHCP"):
         run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-{name}"])
+    # Getting an address from the router (DHCP) must work while everything else is closed, or after a
+    # restart the PC has no network at all until Windows' own rule lets it through.
+    for local, remote in (("68", "67"), ("546", "547")):
+        run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-DHCP", "dir=out",
+             "action=allow", "protocol=UDP", f"localport={local}", f"remoteport={remote}", "enable=yes"])
     run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-Server", "dir=out",
          "action=allow", f"remoteip={server_ip}", "enable=yes"])
     run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={RULE_PREFIX}-LAN", "dir=out",
@@ -263,7 +265,7 @@ def flush_dns() -> None:
 def restore_defaults() -> None:
     """Used by the uninstaller."""
     internet(True)
-    for name in ("Server", "LAN", "DNS", "Always", "Update"):
+    for name in ("Server", "LAN", "DNS", "DHCP", "Always", "Update"):
         run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-{name}"])
     powershell("Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex "
                "-ResetServerAddresses }")
