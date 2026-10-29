@@ -131,6 +131,52 @@ def keep_wifi_connected() -> None:
         log.warning("wifi policy failed: %s", e)
 
 
+def wifi_profiles() -> list[tuple[str, str]]:
+    """Saved Wi-Fi networks as (name, 'auto'|'manual'), read from Windows' own profile files: `netsh wlan
+    show ...` needs Location turned on, these files don't."""
+    if not IS_WIN:
+        return []
+    import glob
+    import os
+    import xml.etree.ElementTree as ET
+    out = []
+    root = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "Microsoft", "Wlansvc", "Profiles",
+                        "Interfaces", "*", "*.xml")
+    for path in sorted(glob.glob(root), key=os.path.getmtime, reverse=True):
+        try:
+            tree = ET.parse(path).getroot()
+        except (OSError, ET.ParseError):
+            continue
+        ns = {"w": tree.tag.split("}")[0].strip("{")} if tree.tag.startswith("{") else {}
+        name = tree.findtext("w:name" if ns else "name", "", ns)
+        mode = tree.findtext("w:connectionMode" if ns else "connectionMode", "", ns) or "manual"
+        if name and all(name != n for n, _ in out):
+            out.append((name, mode))
+    return out
+
+
+def wifi_set_auto(name: str) -> None:
+    """Make Windows join this saved network by itself (it stops doing so after a manual disconnect)."""
+    run(["netsh", "wlan", "set", "profileparameter", f"name={name}", "connectionmode=auto"])
+
+
+def wifi_connect(name: str) -> str:
+    if not IS_WIN:
+        log.info("[dry-run] wifi connect %s", name)
+        return ""
+    try:
+        p = subprocess.run(["netsh", "wlan", "connect", f"name={name}"], capture_output=True, text=True,
+                           creationflags=NO_WINDOW, timeout=30)
+        return f"{p.returncode} {(p.stdout + p.stderr).strip()[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return f"failed: {e}"
+
+
+def connected_networks() -> list[str]:
+    """Names of the networks Windows is connected to right now (no Location needed)."""
+    return [n.strip() for n in powershell("(Get-NetConnectionProfile).Name").splitlines() if n.strip()]
+
+
 def logoff(session_id: int) -> None:
     log.warning("logging off session %s", session_id)
     if IS_WIN and session_id is not None:

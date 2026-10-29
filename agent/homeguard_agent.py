@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "harden_kid_accounts": True,
     "lock_as_shell": True,             # kids' sign-in starts the lock screen instead of the Windows desktop
     "diag_upload": True,               # send the agent log to the server, for troubleshooting from afar
+    "home_wifi": [],                   # home Wi-Fi names to rejoin when the PC isn't connected (also learned)
 }
 
 
@@ -65,6 +66,7 @@ class Agent:
         self.hardened: set[str] = set()
         self.poll_lock = threading.Lock()
         self.log_path = ""
+        self.home_wifi: list[str] = list(cfg.get("home_wifi") or [])
         self.signin_at = 0.0  # when the current kid signed in, until the lock screen first answers
         app = os.path.dirname(os.path.abspath(__file__))
         exe = sys.executable
@@ -237,7 +239,8 @@ class Agent:
         server_ip = urlparse(self.cfg["server_url"]).hostname or ""
         last_route, last = "", {}
         last_test = ("", "")
-        tick = 0
+        tick = no_route = 0
+        self.load_home_wifi()
         while True:
             try:
                 # Every 2 seconds (it sends nothing): shows how long after a restart the PC has a network.
@@ -245,6 +248,15 @@ class Agent:
                 if route != last_route:
                     log.info("route to server %s: %s", server_ip, route)
                     last_route = route
+                if route.startswith("via"):
+                    if no_route or tick % 30 == 0:
+                        self.learn_home_wifi()
+                    no_route = 0
+                else:
+                    # Windows doesn't always rejoin the Wi-Fi after a restart; after 10s do it ourselves.
+                    no_route += 1
+                    if no_route >= 5 and (no_route - 5) % 8 == 0:
+                        self.rejoin_wifi((no_route - 5) // 8, no_route * 2)
                 if tick % 8 == 0:
                     st = winctl.network_status(full=tick % 32 == 0)
                     if "windows" not in st and "windows" in last:
@@ -261,6 +273,53 @@ class Agent:
                 log.exception("network watch failed")
             tick += 1
             time.sleep(2)
+
+    def _home_wifi_path(self) -> str:
+        return os.path.join(os.path.dirname(self.log_path), "home_wifi.json") if self.log_path else ""
+
+    def load_home_wifi(self) -> None:
+        path = self._home_wifi_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                for name in json.load(f):
+                    if name not in self.home_wifi:
+                        self.home_wifi.append(name)
+        except (OSError, ValueError, TypeError):
+            pass
+        saved = winctl.wifi_profiles()
+        log.info("saved wi-fi: %s; home: %s", ", ".join(f"{n} ({m})" for n, m in saved) or "none",
+                 ", ".join(self.home_wifi) or "not known yet")
+        for name, mode in saved:
+            if name in self.home_wifi and mode != "auto":
+                winctl.wifi_set_auto(name)
+                log.info("wi-fi %s set to connect automatically", name)
+
+    def learn_home_wifi(self) -> None:
+        """The Wi-Fi we're on reaches the HomeGuard server, so it's a home network: remember it and make
+        sure Windows joins it by itself."""
+        saved = dict(winctl.wifi_profiles())
+        for name in winctl.connected_networks():
+            if name not in saved:
+                continue
+            if name not in self.home_wifi:
+                self.home_wifi.insert(0, name)
+                log.info("home wi-fi learned: %s", name)
+                try:
+                    with open(self._home_wifi_path(), "w", encoding="utf-8") as f:
+                        json.dump(self.home_wifi, f, ensure_ascii=False)
+                except OSError as e:
+                    log.warning("saving home wi-fi failed: %s", e)
+            if saved[name] != "auto":
+                winctl.wifi_set_auto(name)
+                log.info("wi-fi %s set to connect automatically", name)
+
+    def rejoin_wifi(self, attempt: int, down_for: int) -> None:
+        names = self.home_wifi or [n for n, _ in winctl.wifi_profiles()]
+        if not names:
+            log.info("no network for %ds and no saved wi-fi to join", down_for)
+            return
+        name = names[attempt % len(names)]
+        log.info("no network for %ds: joining wi-fi %s -> %s", down_for, name, winctl.wifi_connect(name))
 
     @staticmethod
     def route_to(ip: str) -> str:
