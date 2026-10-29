@@ -11,6 +11,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -20,6 +23,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import android.view.KeyEvent
 import org.json.JSONObject
 
 /**
@@ -225,6 +229,7 @@ class GuardService : Service() {
         if (locked != lastLocked) {
             lastLocked = locked
             AppControl.setLockedChrome(this, locked)
+            if (locked) pauseMedia() else releaseAudio()
         }
         main.post {
             overlay?.update(s, lastState?.optBoolean("extend_pending") ?: false, api.online)
@@ -333,4 +338,31 @@ class GuardService : Service() {
     }
 
     fun canDrawOverlay() = Settings.canDrawOverlays(this)
+
+    private var audioFocus: AudioFocusRequest? = null
+
+    /** Locked: whatever plays (music, videos) pauses where it is, and stays paused. The apps stay open,
+     *  so the kid carries on from the same place next time. */
+    private fun pauseMedia() {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        try {
+            for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP))
+                am.dispatchMediaKeyEvent(KeyEvent(action, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            // Holding the audio focus also stops apps that ignore the pause key, and keeps them quiet.
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
+                .setOnAudioFocusChangeListener { }
+                .build()
+            am.requestAudioFocus(req)
+            audioFocus = req
+        } catch (e: Exception) {
+            Log.w(TAG, "pause media", e)
+        }
+    }
+
+    private fun releaseAudio() {
+        val req = audioFocus ?: return
+        audioFocus = null
+        try { getSystemService(AudioManager::class.java)?.abandonAudioFocusRequest(req) } catch (_: Exception) {}
+    }
 }
