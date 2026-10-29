@@ -232,28 +232,47 @@ class Agent:
                 log.exception("lockscreen guard failed")
 
     def network_watch(self) -> None:
-        """Log the Wi-Fi, firewall and real reachability whenever they change, so a "no internet" report
-        can be traced to its cause (Wi-Fi dropped, firewall still closed, names not resolving...)."""
-        last: dict = {}
+        """Log the network, firewall and real reachability whenever they change, so a "no internet" report
+        can be traced to its cause (no address yet, firewall still closed, names not resolving...)."""
+        server_ip = urlparse(self.cfg["server_url"]).hostname or ""
+        last_route, last = "", {}
         last_test = ("", "")
         tick = 0
         while True:
             try:
-                st = winctl.network_status(full=tick % 4 == 0)
-                if "windows" not in st and "windows" in last:
-                    st["windows"] = last["windows"]
-                if st != last:
-                    log.info("network: %s", "; ".join(f"{k}={v}" for k, v in st.items()))
-                    last = st
-                test = (self.mode, self.reachability()) if self.mode != "offline" else ("offline", "")
-                if test != last_test:
-                    if test[1]:
-                        log.info("internet check (mode %s): %s", *test)
-                    last_test = test
+                # Every 2 seconds (it sends nothing): shows how long after a restart the PC has a network.
+                route = self.route_to(server_ip)
+                if route != last_route:
+                    log.info("route to server %s: %s", server_ip, route)
+                    last_route = route
+                if tick % 8 == 0:
+                    st = winctl.network_status(full=tick % 32 == 0)
+                    if "windows" not in st and "windows" in last:
+                        st["windows"] = last["windows"]
+                    if st != last:
+                        log.info("network: %s", "; ".join(f"{k}={v}" for k, v in st.items()))
+                        last = st
+                    test = (self.mode, self.reachability()) if self.mode != "offline" else ("offline", "")
+                    if test != last_test:
+                        if test[1]:
+                            log.info("internet check (mode %s): %s", *test)
+                        last_test = test
             except Exception:
                 log.exception("network watch failed")
             tick += 1
-            time.sleep(15)
+            time.sleep(2)
+
+    @staticmethod
+    def route_to(ip: str) -> str:
+        """Which local address would talk to `ip` (no packet is sent), or why there's no way to it."""
+        if not ip:
+            return "no server address"
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((ip, 9))
+                return "via " + s.getsockname()[0]
+        except OSError as e:
+            return f"NONE ({e.strerror or e})"
 
     @staticmethod
     def reachability() -> str:
