@@ -818,6 +818,76 @@ class AgentEndToEnd(unittest.TestCase):
         self.agent.poll_once()
         self.assertEqual(self.logoffs, [1])
 
+    def _patch_winctl(self, **fns):
+        w = homeguard_agent.winctl
+        for name, fn in fns.items():
+            self.addCleanup(setattr, w, name, getattr(w, name))
+            setattr(w, name, fn)
+
+    def test_each_kid_has_a_desktop_frozen_when_not_their_turn(self):
+        tmp = tempfile.mkdtemp()
+        self.agent.log_path = os.path.join(tmp, "agent.log")
+        made, calls = [], []
+        procs = {1: [(10, "chrome.exe"), (11, "explorer.exe"), (12, "pythonw.exe")],
+                 2: [(20, "spotify.exe"), (21, "sihost.exe")]}
+        live = {1: "noam", 2: "Dana"}
+        self._patch_winctl(
+            ensure_kid_account=lambda name, display: made.append((name, display)) or True,
+            sessions=lambda: dict(live),
+            session_processes=lambda sid, name: procs.get(sid, []),
+            suspend=lambda pid, resume=False: calls.append((pid, resume)) or True)
+        self.agent.refresh_kids()
+        self.assertIn(("noam", "נועם"), made)
+        self.assertTrue(self.agent.is_kid("Noam"))
+        # noam is at the screen, nothing approved yet (and past the sign-in grace): his programs freeze.
+        self.user = "noam"
+        homeguard_agent.winctl.console_session = lambda: (1, self.user)
+        self.agent.poll_once()
+        self.agent.console_since -= 1000
+        self.agent.last_heartbeat = time.time()
+        self.agent.poll_once()
+        self.assertIn((10, False), calls)
+        self.assertNotIn((11, False), calls)  # Windows' own parts keep running
+        self.assertNotIn((12, False), calls)  # and so does the lock screen
+        self.assertEqual(self.agent.mode, "offline")
+        # A parent approves: unfrozen, internet per the approval.
+        res = self.local_call("POST", "/login", {"username": "noam", "password": "1234"})
+        self.hg.decide(f"ap:{res['request_id']}:allowlist:30", "parent")
+        calls.clear()
+        self.agent.poll_once()
+        self.assertEqual(calls, [(10, True)])
+        self.assertEqual(self.agent.mode, "allowlist")
+        # Another session's lock screen is told it's in the background, and stays locked.
+        st = self.local_call("GET", "/state?user=dana&sid=2")
+        self.assertTrue(st["background"])
+        self.assertIsNone(st["session"])
+        self.assertIsNotNone(self.local_call("GET", "/state?user=noam&sid=1")["session"])
+        # noam switches user (back to Windows' sign-in screen): his time ends, his programs freeze again.
+        homeguard_agent.winctl.console_session = lambda: (3, "")
+        calls.clear()
+        self.agent.poll_once()
+        self.assertIsNone(self.hg.db.active_session("salon"))
+        self.assertIn((10, False), calls)
+        self.assertEqual(self.agent.mode, "offline")
+        with open(os.path.join(tmp, "frozen.json"), encoding="utf-8") as f:
+            self.assertIn("noam", json.load(f))
+
+    def test_kid_account_never_gets_a_brothers_session(self):
+        self.agent.kid_users = {"noam": "נועם", "dana": "דנה"}
+        with self.agent.lock:
+            self.agent.server_state = {"session": {"id": 1, "kid": "noam", "mode": "open", "remaining": 600}}
+            self.agent.state_time = time.time()
+        self.assertIsNotNone(self.agent.session_for("noam"))
+        self.assertIsNone(self.agent.session_for("dana"))
+        self.assertIsNotNone(self.agent.session_for("hagit"))  # the shared account works as before
+
+    def test_windows_admin_is_never_locked(self):
+        self._patch_winctl(is_admin=lambda user: user.lower() == "hagit")
+        self.agent.kid_users = {"noam": "נועם"}
+        self.assertTrue(self.agent.is_exempt("Hagit"))
+        self.assertFalse(self.agent.is_exempt("noam"))
+        self.assertFalse(self.agent.is_exempt("guest"))
+
     def test_home_wifi_is_learned_and_rejoined(self):
         w = homeguard_agent.winctl
         for name in ("wifi_profiles", "connected_networks", "wifi_set_auto", "wifi_connect"):

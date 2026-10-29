@@ -10,6 +10,7 @@ import json
 import time
 import sys
 import tkinter as tk
+import urllib.parse
 import urllib.request
 
 AGENT = "http://127.0.0.1:8765"
@@ -64,6 +65,20 @@ def ensure_desktop() -> None:
         subprocess.Popen([os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")])
 
 
+def my_identity() -> tuple[str, int | None]:
+    """(Windows user name, session id) this lock screen runs as: each kid has a Windows account of their
+    own, and the agent answers each lock screen about its own session."""
+    import os
+    user = os.environ.get("USERNAME", "").lower()
+    if sys.platform != "win32":
+        return user, None
+    import ctypes
+    sid = ctypes.c_ulong()
+    if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
+        return user, None
+    return user, sid.value
+
+
 def virtual_screen(root: tk.Tk) -> tuple[int, int, int, int]:
     if sys.platform == "win32":
         import ctypes
@@ -101,6 +116,7 @@ class LockScreen:
         self.warned = set()
         self.fails = 0  # /state calls in a row that got no answer from the agent
         self.lock_reason = ""  # why the last session ended, kept until the next unlock
+        self.me, self.my_sid = my_identity()
 
         self.frame = tk.Frame(self.root, bg=BG)
         self.frame.place(relx=0.5, rely=0.5, anchor="center")
@@ -200,6 +216,11 @@ class LockScreen:
         self.timer_label.bind("<Button-1>", lambda e: setattr(self, "_drag", (e.x, e.y)))
         self.timer_label.bind("<B1-Motion>", self._move_timer)
 
+        # Hand the PC to someone else: back to Windows' sign-in screen. This kid's programs stay open
+        # (frozen) until they sign in again and a parent approves.
+        tk.Button(self.root, text="🔄 החלפת משתמש", font=(FONT, 12), bg="#39445a", fg=FG, relief="flat",
+                  activebackground=ACCENT, command=self.switch_user).place(relx=0.98, rely=0.97, anchor="se")
+
         self.root.after(200, self.keep_on_top)
         self.root.after(300, self.poll)
 
@@ -236,6 +257,9 @@ class LockScreen:
         self.kids_known = True
         self.passwordless = not res.get("require_password", True)
         kids = [(k["username"], k["display"]) for k in res.get("kids", [])]
+        mine = [k for k in kids if k[0].lower() == self.me]
+        if mine:
+            kids = mine  # signed in to their own Windows account: only their own name
         if kids != self.kid_names:
             self.kid_names = kids
             for w in self.kids_frame.winfo_children():
@@ -385,6 +409,14 @@ class LockScreen:
             self.note_var.set("")
             self.show_waiting(res.get("display", user))
 
+    def switch_user(self):
+        if self.state == "unlocked":
+            return
+        if self.request_id:
+            call("POST", "/cancel", {"request_id": self.request_id})
+            self.show_locked()
+        call("POST", "/switch", {"sid": self.my_sid})
+
     def cancel(self):
         if self.request_id:
             call("POST", "/cancel", {"request_id": self.request_id})
@@ -450,13 +482,18 @@ class LockScreen:
 
     # ------------------------------------------------------------------ poll
     def poll(self):
-        st = call("GET", "/state")
+        st = call("GET", "/state" + (f"?user={urllib.parse.quote(self.me)}&sid={self.my_sid}" if self.my_sid is not None else ""))
         self.fails = self.fails + 1 if st is None else 0
         if st is None:
             # Agent not answering. A single miss happens when the PC is busy (a browser starting up),
             # so only lock after about half a minute of silence. The agent's own watchdog is at 45s.
             if self.state == "unlocked" and self.fails >= 3:
                 self.end_session("אין חיבור לשומר המחשב")
+                self.show_locked()
+        elif st.get("background"):
+            # Someone else is at the screen now; this kid's session waits, locked, in the background.
+            if self.state == "unlocked":
+                self.end_session("🔄 הוחלף משתמש")
                 self.show_locked()
         elif st.get("exempt"):
             ensure_desktop()

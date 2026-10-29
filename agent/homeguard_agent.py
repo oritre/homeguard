@@ -45,6 +45,18 @@ DEFAULT_CONFIG = {
     "lock_as_shell": True,             # kids' sign-in starts the lock screen instead of the Windows desktop
     "diag_upload": True,               # send the agent log to the server, for troubleshooting from afar
     "home_wifi": [],                   # home Wi-Fi names to rejoin when the PC isn't connected (also learned)
+    "kid_desktops": True,              # a Windows account per kid; a locked kid's programs are frozen, not closed
+    "admins_exempt": True,             # Windows administrators (the parents' account) are never locked
+}
+
+# Windows' own parts of a session, RustDesk (remote help) and the lock screen's Python: never frozen.
+KEEP_RUNNING = {
+    "explorer.exe", "sihost.exe", "svchost.exe", "ctfmon.exe", "conhost.exe", "runtimebroker.exe",
+    "taskhostw.exe", "dllhost.exe", "dwm.exe", "fontdrvhost.exe", "searchhost.exe", "searchapp.exe",
+    "searchui.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe", "textinputhost.exe",
+    "lockapp.exe", "logonui.exe", "winlogon.exe", "csrss.exe", "userinit.exe", "smartscreen.exe",
+    "securityhealthsystray.exe", "applicationframehost.exe", "useroobebroker.exe", "rustdesk.exe",
+    "pythonw.exe", "python.exe",
 }
 
 
@@ -68,6 +80,13 @@ class Agent:
         self.log_path = ""
         self.home_wifi: list[str] = list(cfg.get("home_wifi") or [])
         self.signin_at = 0.0  # when the current kid signed in, until the lock screen first answers
+        self.kid_users: dict[str, str] = {}  # HomeGuard kid -> display name; each has a Windows account
+        self.kids_checked = 0.0
+        self.accounts_made: set[str] = set()
+        self.frozen: dict[str, dict] = {}  # Windows user -> {"session": id, "pids": [[pid, name], ...]}
+        self.admins: dict[str, bool] = {}
+        self.unhardened: set[str] = set()
+        self.console_since = 0.0  # when whoever is at the screen signed in (user_since also moves on logoff)
         app = os.path.dirname(os.path.abspath(__file__))
         exe = sys.executable
         if exe.lower().endswith("python.exe"):
@@ -98,7 +117,28 @@ class Agent:
 
     # ------------------------------------------------------------- decisions
     def is_exempt(self, user: str) -> bool:
-        return user.lower() in {u.lower() for u in self.cfg["exempt_users"]}
+        if user.lower() in {u.lower() for u in self.cfg["exempt_users"]}:
+            return True
+        if not user or not self.cfg["admins_exempt"] or not self.cfg["kid_desktops"] or self.is_kid(user):
+            return False
+        key = user.lower()
+        if key not in self.admins:
+            self.admins[key] = winctl.is_admin(user)
+            if self.admins[key]:
+                log.info("%s is a Windows administrator: never locked", user)
+        return self.admins[key]
+
+    def is_kid(self, user: str) -> bool:
+        """A kid's own Windows account (same name as their HomeGuard user)."""
+        return self.cfg["kid_desktops"] and bool(user) and user.lower() in self.kid_users
+
+    def session_for(self, user: str) -> dict | None:
+        """The approved session, if it belongs to whoever is signed in to Windows as `user`. A kid's own
+        account never gets a brother's session; the shared account and a master sign-in work as before."""
+        s = self.session()
+        if s and self.is_kid(user) and s["kid"].lower() != user.lower() and s["kid"].lower() in self.kid_users:
+            return None
+        return s
 
     def session(self) -> dict | None:
         """Current approved session, counting down locally if the server is unreachable."""
@@ -115,7 +155,7 @@ class Agent:
             return "open"
         if not self.user:
             return "offline"
-        s = self.session()
+        s = self.session_for(self.user)
         return s["mode"] if s else "offline"
 
     def dns_decide(self, domain: str) -> bool:
@@ -152,13 +192,27 @@ class Agent:
             self._poll()
 
     def _poll(self) -> None:
+        if time.time() - self.kids_checked > 600:
+            self.refresh_kids()
         sid, user = winctl.console_session()
         if user != self.user:
             log.info("console user: %r -> %r", self.user, user)
+            prev = self.user
+            s = self.session()
+            if self.is_kid(prev) and s and s["kid"].lower() == prev.lower():
+                # The kid left their seat (switched user): their time ends, their programs wait frozen.
+                log.info("%s switched away: ending their session", prev)
+                self.server("POST", "/api/end", {"pc": self.cfg["pc_name"]})
+                with self.lock:
+                    self.server_state = None
             self.user, self.session_id, self.user_since = user, sid, time.time()
+            self.console_since = self.user_since
             if user and not self.is_exempt(user) and self.cfg["harden_kid_accounts"] and user not in self.hardened:
                 winctl.harden_user(user, self.lock_cmd if self.cfg["lock_as_shell"] else "")
                 self.hardened.add(user)
+            elif user and self.is_exempt(user) and user not in self.unhardened:
+                winctl.unharden_user(user)  # a parent's account: normal desktop from the next sign-in
+                self.unhardened.add(user)
         self.session_id = sid
         st = self.server("GET", "/api/state", params={"pc": self.cfg["pc_name"], "user": user})
         if st is not None:
@@ -166,6 +220,82 @@ class Agent:
                 self.server_state, self.state_time = st, time.time()
         self.apply()
         self.watchdog()
+        self.enforce_desktops()
+
+    # --------------------------------------------------------- kids' desktops
+    def _data_path(self, name: str) -> str:
+        return os.path.join(os.path.dirname(self.log_path), name) if self.log_path else ""
+
+    def _save(self, name: str, obj) -> None:
+        path = self._data_path(name)
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False)
+        except OSError as e:
+            log.warning("saving %s failed: %s", name, e)
+
+    def _load(self, name: str, default):
+        try:
+            with open(self._data_path(name), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError, TypeError):
+            return default
+
+    def refresh_kids(self) -> None:
+        """The kids' list from the server (kept on disk for when it's away), and a Windows account for each."""
+        self.kids_checked = time.time()
+        if not self.cfg["kid_desktops"]:
+            return
+        res = self.server("GET", "/api/kids")
+        if res and not res.get("offline") and isinstance(res.get("kids"), list):
+            kids = {str(k["username"]).lower(): str(k.get("display") or k["username"]) for k in res["kids"]}
+            if kids != self.kid_users:
+                self.kid_users = kids
+                self._save("kids.json", kids)
+        elif not self.kid_users:
+            self.kid_users = self._load("kids.json", {})
+        for name, display in self.kid_users.items():
+            if name not in self.accounts_made:
+                if winctl.ensure_kid_account(name, display):
+                    log.info("Windows account created for %s (%s)", name, display)
+                self.accounts_made.add(name)
+
+    def enforce_desktops(self) -> None:
+        """Every kid's Windows session is frozen unless that kid is at the screen with approved time.
+        Frozen programs keep their windows and work but play nothing and use no network."""
+        if not self.cfg["kid_desktops"] or not self.kid_users:
+            return
+        live = winctl.sessions()
+        changed = False
+        for user, f in list(self.frozen.items()):
+            if live.get(f["session"], "").lower() != user:  # signed out or restarted since
+                del self.frozen[user]
+                changed = True
+        for sid, name in live.items():
+            user = name.lower()
+            if user not in self.kid_users:
+                continue
+            active = sid == self.session_id and self.user.lower() == user and self.session_for(user) is not None
+            if active and user in self.frozen:
+                pids = self.frozen.pop(user)["pids"]
+                for pid, _ in pids:
+                    winctl.suspend(pid, resume=True)
+                log.info("unfroze %d programs of %s", len(pids), user)
+                changed = True
+            elif not active and user not in self.frozen:
+                at_screen = sid == self.session_id and self.user.lower() == user
+                if at_screen and time.time() - self.console_since < self.cfg["logon_grace"]:
+                    continue  # just signed in, nothing of theirs is running yet: let Windows finish setting up
+                pids = [[pid, prog] for pid, prog in winctl.session_processes(sid, name)
+                        if prog.lower() not in KEEP_RUNNING and winctl.suspend(pid)]
+                self.frozen[user] = {"session": sid, "pids": pids}
+                log.info("froze %d programs of %s (session %s): %s", len(pids), user, sid,
+                         ", ".join(sorted({p for _, p in pids}))[:300])
+                changed = True
+        if changed:
+            self._save("frozen.json", self.frozen)
 
     def apply(self) -> None:
         mode = self.current_mode()
@@ -387,7 +517,11 @@ class Agent:
                 log.exception("diag upload failed")
             time.sleep(30)
 
-    def local_state(self) -> dict:
+    def local_state(self, user: str = "", sid: str = "") -> dict:
+        if sid.isdigit() and self.session_id is not None and int(sid) != self.session_id:
+            # A lock screen in a session that isn't at the screen (a kid who switched user): it stays locked.
+            return {"user": user, "exempt": False, "session": None, "extend_pending": False, "background": True,
+                    "server_online": self.server_online, "pc": self.cfg["pc_name"]}
         self.last_heartbeat = time.time()
         if self.signin_at:
             log.info("lock screen answered %.1fs after sign-in", self.last_heartbeat - self.signin_at)
@@ -395,11 +529,13 @@ class Agent:
         with self.lock:
             st = self.server_state or {}
         return {"user": self.user, "exempt": bool(self.user) and self.is_exempt(self.user),
-                "session": self.session(), "extend_pending": st.get("extend_pending", False),
+                "session": self.session_for(self.user), "extend_pending": st.get("extend_pending", False),
                 "server_online": self.server_online, "pc": self.cfg["pc_name"]}
 
     def run(self) -> None:
         server_ip = urlparse(self.cfg["server_url"]).hostname or ""
+        self.kid_users = self._load("kids.json", {})
+        self.frozen = self._load("frozen.json", {})
         winctl.keep_wifi_connected()
         winctl.firewall_setup(server_ip, self.cfg["upstream_dns"])
         winctl.internet(False)
@@ -443,7 +579,7 @@ def make_local_handler(agent: Agent):
             u = urlparse(self.path)
             qs = {k: v[0] for k, v in parse_qs(u.query).items()}
             if u.path == "/state":
-                self._send(agent.local_state())
+                self._send(agent.local_state(qs.get("user", ""), qs.get("sid", "")))
             elif u.path == "/kids":
                 agent.last_heartbeat = time.time()
                 self._send(agent.server("GET", "/api/kids") or {"kids": [], "require_password": True, "offline": True})
@@ -487,6 +623,11 @@ def make_local_handler(agent: Agent):
                 self._send({"ok": True})
             elif path == "/extend":
                 self._send(agent.server("POST", "/api/extend", {"pc": pc}) or {"ok": False, "error": "אין חיבור"})
+            elif path == "/switch":
+                sid = body.get("sid")
+                if isinstance(sid, int):
+                    winctl.disconnect(sid)
+                self._send({"ok": True})
             elif path == "/end":
                 agent.server("POST", "/api/end", {"pc": pc})
                 agent.poll_once()
