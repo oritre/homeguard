@@ -110,6 +110,32 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.hg.request_status(rid)["status"], "denied")
         self.assertIsNone(self.hg.state("salon")["session"])
 
+    def test_wait_after_cancel_and_after_no(self):
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        self.hg.cancel_request(rid)
+        # the request disappears from both parents' chats (and from the deletion check)
+        self.assertEqual(len(self.tg.sent("deleteMessage")), 2)
+        self.assertEqual(self.db.q("SELECT COUNT(*) c FROM messages WHERE text LIKE '%מבקש/ת להיכנס%'")[0]["c"], 0)
+        res = self.hg.login("salon", "noam", "1234")
+        self.assertFalse(res["ok"])
+        self.assertIn("אפשר לבקש שוב בעוד 4:", res["error"])
+        self.db.x("UPDATE requests SET decided_at=decided_at-301")
+        rid = self.hg.login("salon", "noam", "1234")["request_id"]
+        self.hg.decide(f"dn:{rid}", "אורי")
+        self.db.x("UPDATE requests SET decided_at=decided_at-600 WHERE id=?", (rid,))
+        res = self.hg.login("salon", "noam", "1234")
+        self.assertFalse(res["ok"])
+        self.assertIn("אמרו לא", res["error"])
+        # the parents change the waiting times (here: none)
+        self.hg.handle_command(1, "/limits", "0 0")
+        self.assertEqual(self.hg.request_limits(), (0, 0))
+        self.assertTrue(self.hg.login("salon", "noam", "1234")["ok"])
+
+    def test_new_request_replaces_old_without_waiting(self):
+        self.hg.login("salon", "noam", "1234")
+        self.assertTrue(self.hg.login("salon", "noam", "1234")["ok"])  # replaced, not cancelled by the kid
+        self.assertEqual(len(self.tg.sent("deleteMessage")), 2)
+
     def test_login_note_reaches_parents(self):
         self.hg.login("salon", "noam", "1234", "  רוצה לעשות\nשיעורי בית ביוטיוב ")
         self.assertIn("💬 רוצה לעשות שיעורי בית ביוטיוב", self.tg.sent()[0]["text"])
@@ -127,6 +153,8 @@ class ServerTest(unittest.TestCase):
         self.assertIn("צריך אינטרנט מלא לעבודה", self.tg.sent()[-1]["text"])
         self.hg.decide(f"dn:{res['request_id']}", "אורי")  # "no" keeps the current session
         self.assertEqual(self.hg.state("salon")["session"]["mode"], "allowlist")
+        self.assertIn("אמרו לא", self.hg.rerequest("salon")["error"])  # not again right away
+        self.db.x("UPDATE requests SET decided_at=decided_at-901")
         res = self.hg.rerequest("salon")
         self.hg.decide(f"ap:{res['request_id']}:offline:60", "אורי")
         st = self.hg.state("salon")

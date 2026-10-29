@@ -168,6 +168,10 @@ code { background: var(--accent-soft); padding: 0 5px; border-radius: 5px; font-
     <ul class="list">
       <li><span><b>🌐 להציע "אינטרנט מלא"</b><br><span class="sub">כבוי: בבקשות כניסה מוצעים רק "אתרים מאושרים" ו"בלי אינטרנט". דלוק: גם אינטרנט מלא (חוץ מאתרים חסומים).</span></span><span class="seg" data-setting="fullnet"><button data-v="0">כבוי</button><button data-v="1">דלוק</button></span></li>
       <li><span><b>🔑 כניסה עם סיסמה</b><br><span class="sub">כבוי: הילד רק בוחר את השם שלו, והאישור שלכם הוא הבדיקה. דלוק: צריך גם סיסמה. מאסטר תמיד עם סיסמה.</span></span><span class="seg" data-setting="passwords"><button data-v="0">כבוי</button><button data-v="1">דלוק</button></span></li>
+      <li><span><b>⏳ המתנה לפני בקשה חדשה</b><br><span class="sub">כמה דקות ילד מחכה לפני שהוא יכול לבקש כניסה שוב: אחרי שביטל בקשה, ואחרי שאמרתם "לא". 0 = בלי המתנה. בקשות שבוטלו נמחקות מהטלגרם.</span></span>
+        <span class="row"><label class="sub">אחרי ביטול <input id="waitCancel" type="number" min="0" max="1440" style="width:4.5em"></label>
+        <label class="sub">אחרי "לא" <input id="waitDeny" type="number" min="0" max="1440" style="width:4.5em"></label>
+        <button class="btn small" data-act="limits">שמירה</button></span></li>
     </ul>
   </div>
   <h2>📲 עדכון האפליקציה באנדרואיד</h2>
@@ -458,6 +462,8 @@ function renderSettings() {
     const v = S.settings[seg.dataset.setting] ? "1" : "0";
     for (const b of $$("button", seg)) b.classList.toggle("on", b.dataset.v === v);
   }
+  for (const [id, key] of [["#waitCancel", "wait_after_cancel"], ["#waitDeny", "wait_after_deny"]])
+    if (document.activeElement !== $(id)) $(id).value = S.settings[key];
   const vs = S.devices.filter((d) => d.version).map((d) => `${d.name}: ${d.version}`);
   $("#versions").textContent = vs.length ? "גרסאות: " + vs.join(" · ") : "אין עדיין מכשיר אנדרואיד שמדווח גרסה";
 }
@@ -538,6 +544,7 @@ document.addEventListener("click", async (e) => {
   const what = a.dataset.act;
   if (what === "lockall") confirm("לנעול את כל המכשירים עכשיו?") && act({ action: "lock", pc: "*" });
   else if (what === "update") act({ action: "update" });
+  else if (what === "limits") act({ action: "limits", after_cancel: +$("#waitCancel").value, after_deny: +$("#waitDeny").value });
   else if (what === "audit") { a.disabled = true; await act({ action: "audit" }); a.disabled = false; }
   else if (what === "logout") { await api("/admin/api/logout", {}); showLogin("יצאתם מהממשק."); }
 });
@@ -550,7 +557,7 @@ const CMDS = [
   ["/status", "מי מחובר ולכמה זמן, עם כפתור נעילה לכל מכשיר"], ["/lock [מכשיר|משתמש]", "לנעול עכשיו. בלי שם: כל המכשירים"],
   ["/extend <מכשיר> <דקות>", "להוסיף זמן"], ["/sites", "שלוש רשימות האתרים"], ["/allow site.com [זמן]", "לאשר אתר, תמיד או לזמן"],
   ["/unallow site.com", "להסיר מהמאושרים"], ["/block site.com", "לחסום תמיד"], ["/unblock site.com", "לבטל חסימה"],
-  ["/always site.com", "פתוח בכל מצב"], ["/unalways site.com", "להסיר מהפתוחים תמיד"], ["/fullnet on|off", "להציע גם אינטרנט מלא"],
+  ["/always site.com", "פתוח בכל מצב"], ["/unalways site.com", "להסיר מהפתוחים תמיד"], ["/fullnet on|off", "להציע גם אינטרנט מלא"], ["/limits 5 15", "המתנה לפני בקשה חדשה (אחרי ביטול / אחרי לא)"],
   ["/apps [שם]", "אפליקציות באנדרואיד עם כפתורי כללים"], ["/update", "לבקש מהמכשירים לבדוק עדכון"],
   ["/kids", "חשבונות וסיסמאות"], ["/addkid <משתמש> [שם]", "ילד/ה חדש/ה עם סיסמה זמנית"], ["/addmaster <משתמש> [שם]", "חשבון מאסטר"],
   ["/setpw <משתמש> <סיסמה>", "לקבוע סיסמה"], ["/resetpw <משתמש>", "סיסמה זמנית חדשה"], ["/disable · /enable <משתמש>", "להשבית / להחזיר"],

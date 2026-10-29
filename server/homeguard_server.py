@@ -183,6 +183,7 @@ class DB:
                                      ("sites", "expires", "REAL"),
                                      ("sites", "session_id", "INTEGER"),
                                      ("requests", "detail", "TEXT"),
+                                     ("requests", "decided_at", "REAL"),
                                      ("pcs", "version", "INTEGER"),
                                      ("web_sessions", "kind", "TEXT NOT NULL DEFAULT 'browser'")):
                 if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
@@ -395,6 +396,14 @@ class HomeGuard:
             self.tg.call("editMessageText", chat_id=chat, message_id=mid, text=text)
             self.db.x("UPDATE messages SET text=?, markup=NULL WHERE chat=? AND mid=?", (text, chat, mid))
 
+    def delete_all(self, messages: list) -> None:
+        """Remove the bot's messages from the parents' chats (and from the history, so the deletion
+        check doesn't report them)."""
+        for chat, mid in messages:
+            if self.tg:
+                self.tg.call("deleteMessage", chat_id=chat, message_id=mid)
+            self.db.x("DELETE FROM messages WHERE chat=? AND mid=?", (chat, mid))
+
     def reply(self, chat: int, text: str, keyboard=None) -> None:
         if not self.tg:
             log.info("REPLY %s: %s", chat, text)
@@ -499,6 +508,9 @@ class HomeGuard:
                             "VALUES ('login',?,?,?,'approved','master')", (pc, name, now))
             self.notify(f"🔓 {kid['display']} נכנס/ה למחשב '{pc}' עם חשבון מאסטר ({hhmm(now)})", chats=[self.owner()])
             return {"ok": True, "request_id": rid, "display": kid["display"], "approved": True}
+        wait = self.request_wait(name)
+        if wait:
+            return wait
         rid = self._access_request(pc, name, f"🧒 {kid['display']} מבקש/ת להיכנס למחשב '{pc}' ({hhmm(now)})", note)
         return {"ok": True, "request_id": rid, "display": kid["display"]}
 
@@ -511,6 +523,9 @@ class HomeGuard:
         k = self.db.kid(s["kid"])
         if k and k["role"] == "master":
             return {"ok": False, "error": "חשבון מאסטר לא צריך אישור"}
+        wait = self.request_wait(s["kid"])
+        if wait:
+            return wait
         left = "ללא הגבלת זמן" if s["ends"] >= FOREVER else f"נשארו {int((s['ends'] - time.time()) // 60)} דק'"
         head = (f"🔁 {self.db.kid_display(s['kid'])} מבקש/ת הרשאה חדשה במחשב '{pc}' ({hhmm(time.time())})\n"
                 f"עכשיו: {MODES[s['mode']]} · {left}")
@@ -519,8 +534,10 @@ class HomeGuard:
     def _access_request(self, pc: str, kid: str, head: str, note: str, session_id=None) -> int:
         """Ask the parents for access (mode x duration buttons). One pending login request per pc."""
         for old in self.db.q("SELECT * FROM requests WHERE pc=? AND kind='login' AND status='pending'", (pc,)):
-            self.db.x("UPDATE requests SET status='cancelled' WHERE id=?", (old["id"],))
-            self.edit_all(json.loads(old["messages"]), f"↩️ בקשה בוטלה ({self.db.kid_display(old['kid'])}, {pc})")
+            # Replaced by the new request: not the kid cancelling, so no waiting time.
+            self.db.x("UPDATE requests SET status='cancelled', decided_by='replaced', decided_at=? WHERE id=?",
+                      (time.time(), old["id"]))
+            self.delete_all(json.loads(old["messages"]))
         note = " ".join(str(note).split())[:300]
         rid = self.db.x("INSERT INTO requests (kind, pc, kid, created, session_id, detail) VALUES ('login',?,?,?,?,?)",
                         (pc, kid, time.time(), session_id, note or None))
@@ -546,6 +563,31 @@ class HomeGuard:
             msgs += self.notify(*message([m for m in modes if m != "full"]), chats=others)
         self.db.x("UPDATE requests SET messages=? WHERE id=?", (json.dumps(msgs), rid))
         return rid
+
+    def request_limits(self) -> tuple[int, int]:
+        """Minutes a kid waits before a new request: after cancelling one, and after a "no"."""
+        return (int(self.db.setting("wait_after_cancel", "5") or 0),
+                int(self.db.setting("wait_after_deny", "15") or 0))
+
+    def set_request_limits(self, after_cancel: int, after_deny: int) -> None:
+        self.db.set_setting("wait_after_cancel", str(max(0, min(after_cancel, 24 * 60))))
+        self.db.set_setting("wait_after_deny", str(max(0, min(after_deny, 24 * 60))))
+
+    def request_wait(self, kid: str) -> dict | None:
+        """Too soon after this kid cancelled a request or got a "no": the answer for the lock screen."""
+        after_cancel, after_deny = self.request_limits()
+        now = time.time()
+        rows = self.db.q("SELECT status, decided_at FROM requests WHERE kid=? AND kind='login' AND "
+                         "((status='cancelled' AND decided_by='kid') OR status='denied') AND decided_at>?",
+                         (kid, now - max(after_cancel, after_deny) * 60))
+        waits = [(r["decided_at"] + (after_deny if r["status"] == "denied" else after_cancel) * 60 - now, r)
+                 for r in rows]
+        left, r = max(waits, key=lambda w: w[0], default=(0, None))
+        if left <= 0:
+            return None
+        why = "אבא/אמא אמרו לא" if r["status"] == "denied" else "ביטלת בקשה"
+        return {"ok": False, "retry_in": int(left),
+                "error": f"{why}. אפשר לבקש שוב בעוד {int(left) // 60}:{int(left) % 60:02d} דקות"}
 
     def full_internet_allowed(self) -> bool:
         return self.db.setting("full_internet", "0") == "1"
@@ -613,9 +655,9 @@ class HomeGuard:
     def cancel_request(self, rid: int) -> None:
         rows = self.db.q("SELECT * FROM requests WHERE id=? AND status='pending'", (rid,))
         if rows:
-            self.db.x("UPDATE requests SET status='cancelled' WHERE id=?", (rid,))
-            self.edit_all(json.loads(rows[0]["messages"]),
-                          f"↩️ {self.db.kid_display(rows[0]['kid'])} ביטל/ה את הבקשה ({rows[0]['pc']})")
+            self.db.x("UPDATE requests SET status='cancelled', decided_by='kid', decided_at=? WHERE id=?",
+                      (time.time(), rid))
+            self.delete_all(json.loads(rows[0]["messages"]))
 
     def state(self, pc: str, win_user: str = "", version: int | None = None) -> dict:
         now = time.time()
@@ -796,7 +838,8 @@ class HomeGuard:
         msgs = json.loads(r["messages"])
         display = self.db.kid_display(r["kid"])
         if kind == "dn":
-            self.db.x("UPDATE requests SET status='denied', decided_by=? WHERE id=?", (who, rid))
+            self.db.x("UPDATE requests SET status='denied', decided_by=?, decided_at=? WHERE id=?",
+                      (who, time.time(), rid))
             self.edit_all(msgs, f"❌ {display} ({r['pc']}): נדחה ע\"י {who}")
             return "נדחה"
         if kind == "ap":
@@ -1069,6 +1112,13 @@ class HomeGuard:
             self.reply(chat, "🌐 אפשר לאשר גם אינטרנט מלא (בנוסף לאתרים מאושרים)" if self.full_internet_allowed() else
                        "✅ ברירת מחדל: כל האתרים חסומים חוץ מאתרים שאישרתם. אינטרנט מלא לא מוצע בבקשות.\n"
                        "לשינוי: /fullnet on או /fullnet off")
+        elif cmd == "/limits":
+            nums = [int(x) for x in arg.split() if x.isdigit()]
+            if len(nums) == 2:
+                self.set_request_limits(*nums)
+            c, d = self.request_limits()
+            self.reply(chat, f"⏳ המתנה לפני בקשה חדשה: {c} דק' אחרי שהילד ביטל בקשה, {d} דק' אחרי \"לא\" "
+                             "(0 = בלי המתנה).\nלשינוי: /limits <אחרי ביטול> <אחרי לא>, למשל /limits 5 15")
         elif cmd == "/passwords":
             if arg in ("on", "off"):
                 self.db.set_setting("require_password", "1" if arg == "on" else "0")
@@ -1333,6 +1383,8 @@ class WebAdmin:
                 for a in self.db.q("SELECT * FROM apps WHERE pkg IN (SELECT pkg FROM device_apps) ORDER BY label")]
         return {"now": now, "devices": devices, "pending": pending, "kids": kids, "sites": sites, "apps": apps,
                 "settings": {"fullnet": self.hg.full_internet_allowed(), "passwords": self.hg.passwords_required(),
+                             "wait_after_cancel": self.hg.request_limits()[0],
+                             "wait_after_deny": self.hg.request_limits()[1],
                              "durations": list(self.hg.cfg["durations"]),
                              "extend_options": list(self.hg.cfg["extend_options"]),
                              "login_modes": list(self.hg.login_modes()), "update_seq": int(self.db.setting("update_seq", "0"))},
@@ -1485,6 +1537,12 @@ class WebAdmin:
                 return {"ok": False, "error": "הגדרה לא מוכרת"}
             db.set_setting(key, "1" if body.get("value") else "0")
             return {"ok": True, "message": "נשמר"}
+        if a == "limits":
+            try:
+                hg.set_request_limits(int(body.get("after_cancel", 0)), int(body.get("after_deny", 0)))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "צריך מספר דקות"}
+            return {"ok": True, "message": "נשמר"}
         if a == "update":
             hg.request_update()
             return {"ok": True, "message": "📲 ביקשתי מהמכשירים לבדוק עדכון עכשיו"}
@@ -1519,6 +1577,7 @@ HELP = """🛡️ HomeGuard – פקודות:
 /allow site.com – לאשר אתר תמיד
 /allow site.com 30 · 2 שעות · 18:30 – לאשר לזמן מוגבל או עד שעה (גובר גם על חסימה)
 /fullnet on|off – להציע גם "אינטרנט מלא" בבקשות כניסה (ברירת מחדל: לא)
+/limits <ביטול> <לא> – כמה דקות ילד מחכה לפני בקשה חדשה אחרי שביטל בקשה / אחרי "לא" (ברירת מחדל: 5 ו-15)
 /unallow site.com – להסיר מהמאושרים
 /block site.com – לחסום אתר תמיד
 /unblock site.com – לבטל חסימה
