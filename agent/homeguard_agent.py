@@ -46,7 +46,9 @@ DEFAULT_CONFIG = {
     "diag_upload": True,               # send the agent log to the server, for troubleshooting from afar
     "home_wifi": [],                   # home Wi-Fi names to rejoin when the PC isn't connected (also learned)
     "kid_desktops": True,              # a Windows account per kid; a locked kid's programs are frozen, not closed
-    "admins_exempt": True,             # Windows administrators (the parents' account) are never locked
+    # Windows administrators are NOT exempt: the shared account the kids use (hagit) is an administrator.
+    # Parents use the lock screen's master sign-in, or list their own account in exempt_users.
+    "admins_exempt": False,
 }
 
 # Windows' own parts of a session, RustDesk (remote help) and the lock screen's Python: never frozen.
