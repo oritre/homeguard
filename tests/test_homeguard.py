@@ -909,8 +909,18 @@ class AgentEndToEnd(unittest.TestCase):
         self.assertIsNone(self.agent.session_for("dana"))
         self.assertIsNotNone(self.agent.session_for("hagit"))  # the shared account works as before
 
-    def test_windows_admin_is_never_locked(self):
+    def test_windows_admin_is_locked_by_default(self):
+        # The shared account the kids use is a Windows administrator: it must stay locked.
         self._patch_winctl(is_admin=lambda user: user.lower() == "hagit")
+        self.agent.kid_users = {"noam": "נועם"}
+        self.assertFalse(self.agent.is_exempt("Hagit"))
+        self.assertFalse(self.agent.is_exempt("noam"))
+        self.agent.poll_once()
+        self.assertEqual(self.agent.current_mode(), "offline")
+
+    def test_windows_admin_exempt_only_when_turned_on(self):
+        self._patch_winctl(is_admin=lambda user: user.lower() == "hagit")
+        self.agent.cfg["admins_exempt"] = True
         self.agent.kid_users = {"noam": "נועם"}
         self.assertTrue(self.agent.is_exempt("Hagit"))
         self.assertFalse(self.agent.is_exempt("noam"))
