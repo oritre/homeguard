@@ -327,6 +327,7 @@ class Telegram:
 
 # The bot's command menu, shown only in the main parent's chat.
 MENU = [
+    {"command": "menu", "description": "תפריט ראשי בכפתורים"},
     {"command": "status", "description": "מצב המחשבים"},
     {"command": "lock", "description": "נעילת מחשב"},
     {"command": "extend", "description": "הוספת זמן"},
@@ -356,6 +357,7 @@ class HomeGuard:
         self.tg = tg
         self.parents = [int(c) for c in cfg["parent_chat_ids"]]
         self.awaiting_time: dict[int, str] = {}
+        self.menu_state: dict[int, dict] = {}  # chat -> choices so far in the button menu
         self.activity_sent: dict[str, float] = {}  # device -> last "used while locked" alert
         self.web = WebAdmin(self)
 
@@ -944,7 +946,9 @@ class HomeGuard:
             who = cq["from"].get("first_name", "הורה")
             self.remember_name(chat, who)
             data = cq.get("data", "")
-            if data.startswith(("cu:", "cx:", "cs:")):
+            if data.startswith("m:"):
+                answer = self.menu_callback(chat, data, cq.get("message"), who)
+            elif data.startswith(("cu:", "cx:", "cs:")):
                 answer = self.ask_custom_time(chat, data)
             elif data.startswith("lk:"):
                 pc = data[3:]
@@ -975,8 +979,14 @@ class HomeGuard:
                                  "כדי לקבל בקשות, הוסיפו אותו ל-parent_chat_ids בקובץ config.json של השרת והפעילו מחדש.")
             return
         self.remember_name(chat, msg.get("from", {}).get("first_name", ""))
-        if chat in self.awaiting_time and not text.startswith("/"):
-            self.answer_custom_time(chat, text)
+        if text == "🏠 תפריט":
+            self.awaiting_time.pop(chat, None)
+            cmd = "/menu"
+        elif chat in self.awaiting_time and not text.startswith("/"):
+            if self.awaiting_time[chat].startswith("m"):
+                self.menu_text_input(chat, text)
+            else:
+                self.answer_custom_time(chat, text)
             return
         self.awaiting_time.pop(chat, None)
         self.handle_command(chat, cmd, arg)
@@ -1037,7 +1047,9 @@ class HomeGuard:
     def handle_command(self, chat: int, cmd: str, arg: str) -> None:
         if chat != self.owner() and not (cmd == "/owner" and not self.db.setting("owner_chat", "")):
             return  # the other parent only answers requests with the buttons
-        if cmd in ("/start", "/help"):
+        if cmd in ("/start", "/menu"):
+            self.main_menu(chat)
+        elif cmd == "/help":
             self.reply(chat, HELP)
         elif cmd == "/status":
             now = time.time()
@@ -1188,6 +1200,313 @@ class HomeGuard:
             self.reply(chat, self.learning_command(arg))
         else:
             self.reply(chat, HELP)
+
+    # ---- main menu: everything with buttons instead of commands (main parent only)
+    MENU_KB = {"keyboard": [[{"text": "🏠 תפריט"}]], "resize_keyboard": True, "is_persistent": True}
+
+    def devices(self, kind: str | None = None) -> list:
+        """Known devices, (name, kind, online). kind: 'pc' (Windows agent) or 'tab' (Android app, which
+        reports its version and its apps)."""
+        now = time.time()
+        tabs = {r["pc"] for r in self.db.q("SELECT DISTINCT pc FROM device_apps")}
+        out = []
+        for p in self.db.q("SELECT * FROM pcs ORDER BY name"):
+            k = "tab" if p["version"] or p["win_user"] == "android" or p["name"] in tabs else "pc"
+            if kind in (None, k):
+                out.append((p["name"], k, bool(p["last_seen"] and now - p["last_seen"] < 90)))
+        return out
+
+    def show(self, chat: int, msg: dict | None, text: str, kb: list | None) -> None:
+        """Replace the tapped menu message (one message that walks through the steps), or send a new one."""
+        if not self.tg:
+            log.info("MENU %s: %s", chat, text)
+            return
+        markup = {"inline_keyboard": kb or []}
+        if msg:
+            res = self.tg.call_raw("editMessageText", chat_id=chat, message_id=msg["message_id"], text=text,
+                                   reply_markup=markup)
+            if res.get("ok") or "not modified" in str(res.get("description", "")).lower():
+                return
+        self.tg.call("sendMessage", chat_id=chat, text=text, reply_markup=markup)
+
+    def main_menu(self, chat: int, msg: dict | None = None) -> None:
+        if not msg and self.tg and self.db.setting(f"menu_kb:{chat}") != "1":
+            # A button under the typing box that always brings the menu back.
+            self.tg.call("sendMessage", chat_id=chat, text="🏠 הכפתור 'תפריט' למטה תמיד מחזיר לכאן.",
+                         reply_markup=self.MENU_KB)
+            self.db.set_setting(f"menu_kb:{chat}", "1")
+        self.menu_state[chat] = {}
+        kb = [[{"text": "▶️ לפתוח לילד", "callback_data": "m:g"}],
+              [{"text": "📊 מצב, נעילה והארכה", "callback_data": "m:s"}],
+              [{"text": "🌐 אתרים", "callback_data": "m:w"}, {"text": "📱 אפליקציות", "callback_data": "m:a"}],
+              [{"text": "👧 ילדים", "callback_data": "m:k"}, {"text": "⚙️ הגדרות", "callback_data": "m:c"}],
+              [{"text": "📜 היסטוריה", "callback_data": "m:h"}, {"text": "❓ עזרה", "callback_data": "m:help"}]]
+        self.show(chat, msg, "🛡️ HomeGuard · תפריט ראשי", kb)
+
+    @staticmethod
+    def nav(back: str | None = "m:home") -> list:
+        row = []
+        if back and back != "m:home":
+            row.append({"text": "⬅️ חזרה", "callback_data": back})
+        row.append({"text": "🏠 תפריט", "callback_data": "m:home"})
+        return row
+
+    def menu_callback(self, chat: int, data: str, msg: dict | None, who: str) -> str:
+        if chat != self.owner():
+            return "התפריט זמין רק להורה הראשי"
+        st = self.menu_state.setdefault(chat, {})
+        parts = data.split(":")
+        step = parts[1] if len(parts) > 1 else "home"
+        arg = parts[2] if len(parts) > 2 else ""
+        self.awaiting_time.pop(chat, None)
+        if step == "home":
+            self.main_menu(chat, msg)
+        # -- open for a kid: device type -> device -> kid -> what -> how long
+        elif step == "g":
+            kinds = {k for _, k, _ in self.devices()}
+            if not kinds:
+                self.show(chat, msg, "עוד לא התחבר אף מכשיר.", [self.nav()])
+                return ""
+            if len(kinds) == 1:
+                return self.menu_callback(chat, f"m:gt:{kinds.pop()}", msg, who)
+            self.show(chat, msg, "▶️ לפתוח לילד · איזה מכשיר?",
+                      [[{"text": "💻 מחשב", "callback_data": "m:gt:pc"},
+                        {"text": "📱 טאבלט", "callback_data": "m:gt:tab"}], self.nav()])
+        elif step == "gt":
+            devs = self.devices(arg)
+            st.clear()
+            st["devs"] = [d[0] for d in devs]
+            if len(devs) == 1:
+                return self.menu_callback(chat, "m:gd:0", msg, who)
+            kb = [[{"text": ("🟢 " if on else "⚫ ") + name, "callback_data": f"m:gd:{i}"}]
+                  for i, (name, _, on) in enumerate(devs)]
+            self.show(chat, msg, "▶️ לפתוח לילד · איזה " + ("מחשב?" if arg == "pc" else "טאבלט?"),
+                      kb + [self.nav("m:g")])
+        elif step == "gd":
+            devs = st.get("devs", [])
+            if not arg.isdigit() or int(arg) >= len(devs):
+                self.main_menu(chat, msg)
+                return "התפריט התחדש"
+            st["pc"] = devs[int(arg)]
+            kids = self.db.q("SELECT username, display FROM kids WHERE role!='master' AND disabled=0 ORDER BY display")
+            kb = [[{"text": k["display"], "callback_data": f"m:gk:{k['username']}"} for k in kids[i:i + 3]]
+                  for i in range(0, len(kids), 3)]
+            self.show(chat, msg, f"▶️ {st['pc']} · לאיזה ילד?", kb + [self.nav("m:g")])
+        elif step == "gk":
+            if "pc" not in st or not self.db.kid(arg):
+                self.main_menu(chat, msg)
+                return "התפריט התחדש"
+            st["kid"] = arg.lower()
+            kb = [[{"text": MODES[m], "callback_data": f"m:gm:{m}"}] for m in ("allowlist", "full", "offline")]
+            self.show(chat, msg, f"▶️ {st['pc']} · {self.db.kid_display(st['kid'])} · מה לפתוח?",
+                      kb + [self.nav(f"m:gd:{st['devs'].index(st['pc'])}")])
+        elif step == "gm":
+            if "kid" not in st or arg not in MODE_NAMES:
+                self.main_menu(chat, msg)
+                return "התפריט התחדש"
+            st["mode"] = arg
+            options = list(self.cfg["durations"]) + ([0] if arg != "offline" else [])
+            kb = [[{"text": fmt_min(m) if m else "♾️ ללא הגבלה", "callback_data": f"m:gx:{m}"} for m in options],
+                  [{"text": "⏱ זמן אחר / עד שעה", "callback_data": "m:gc"}],
+                  self.nav(f"m:gk:{st['kid']}")]
+            self.show(chat, msg, f"▶️ {st['pc']} · {self.db.kid_display(st['kid'])} · {MODES[arg]} · לכמה זמן?", kb)
+        elif step == "gc":
+            if "mode" not in st:
+                self.main_menu(chat, msg)
+                return "התפריט התחדש"
+            self.awaiting_time[chat] = "mg"
+            st["msg"] = msg
+            self.show(chat, msg, f"▶️ {st['pc']} · {self.db.kid_display(st['kid'])} · {MODES[st['mode']]}\n"
+                                 "⏱ כתבו כמה זמן: מספר דקות (45), שעות (2 שעות / 1.5ש) או עד איזו שעה (18:30)",
+                      [self.nav(f"m:gm:{st['mode']}")])
+            return "כתבו את הזמן"
+        elif step == "gx":
+            if "mode" not in st or not arg.isdigit():
+                self.main_menu(chat, msg)
+                return "התפריט התחדש"
+            return self.grant(chat, msg, who, int(arg))
+        # -- status: lock and add time per device
+        elif step == "s":
+            self.menu_status(chat, msg)
+        elif step in ("sl", "se"):
+            devs = st.get("live", [])
+            i, _, minutes = arg.partition("-")
+            if not i.isdigit() or int(i) >= len(devs):
+                self.menu_status(chat, msg)
+                return "התפריט התחדש"
+            pc = devs[int(i)]
+            if step == "sl":
+                answer = f"🔒 {pc} ננעל" if self.lock(pc) else "כבר נעול"
+            else:
+                answer = f"⏳ +{fmt_min(int(minutes))} ל{pc}" if self.extend(pc, int(minutes)) else "אין זמן פעיל"
+            self.menu_status(chat, msg)
+            return answer
+        elif step == "sa":
+            locked = [p[0] for p in self.devices() if self.lock(p[0])]
+            self.menu_status(chat, msg)
+            return "🔒 ננעל: " + ", ".join(locked) if locked else "לא היה מכשיר פתוח"
+        # -- sites
+        elif step == "w":
+            self.show(chat, msg, self.sites_text()[:3900],
+                      [[{"text": "➕ לאשר אתר", "callback_data": "m:wa:allow"},
+                        {"text": "⛔ לחסום אתר", "callback_data": "m:wa:block"}],
+                       [{"text": "🟢 פתוח תמיד", "callback_data": "m:wa:always"},
+                        {"text": "🗑 להסיר אתר", "callback_data": "m:wr"}], self.nav()])
+        elif step == "wa":
+            what = {"allow": "לאשר (אפשר להוסיף זמן: site.com 30 · site.com 18:30)", "block": "לחסום",
+                    "always": "לפתוח תמיד, גם בלי אינטרנט"}.get(arg)
+            if not what:
+                return "?"
+            self.awaiting_time[chat] = f"mw:{arg}"
+            self.show(chat, msg, f"🌐 כתבו את כתובת האתר ל{what}", [self.nav("m:w")])
+            return "כתבו את האתר"
+        elif step == "wr":
+            rows = [(r["domain"], r["list"]) for r in self.db.q("SELECT domain, list FROM sites ORDER BY list, domain")]
+            st["sites"] = rows
+            icon = {"allow": "✅", "block": "⛔", "always": "🟢"}
+            kb = [[{"text": f"🗑 {icon.get(lst, '')} {d}", "callback_data": f"m:wx:{i}"}]
+                  for i, (d, lst) in enumerate(rows[:40])]
+            self.show(chat, msg, "🗑 איזה אתר להסיר?" if rows else "אין אתרים ברשימות", kb + [self.nav("m:w")])
+        elif step == "wx":
+            rows = st.get("sites", [])
+            if arg.isdigit() and int(arg) < len(rows):
+                self.db.remove_site(*rows[int(arg)])
+            return self.menu_callback(chat, "m:wr", msg, who) or "הוסר"
+        # -- apps, kids, settings, history, help
+        elif step == "a":
+            text, kb = self.apps_keyboard()
+            self.reply(chat, text, (kb or []) + [self.nav()])
+        elif step == "k":
+            self.menu_kids(chat, msg)
+        elif step in ("kd", "ke", "kr"):
+            if not self.db.kid(arg):
+                self.menu_kids(chat, msg)
+                return "לא נמצא"
+            user = arg.lower()
+            if step == "kd":
+                self.db.x("UPDATE kids SET disabled=1 WHERE username=?", (user,))
+                self.lock_kid(user)
+                answer = f"⛔ {self.db.kid_display(user)} מושבת"
+            elif step == "ke":
+                self.db.x("UPDATE kids SET disabled=0 WHERE username=?", (user,))
+                answer = f"✅ {self.db.kid_display(user)} פעיל"
+            else:
+                self.db.set_password(user, temp_password(), must_set=True)
+                answer = "🔑 נקבעה סיסמה זמנית"
+            self.menu_kids(chat, msg)
+            return answer
+        elif step == "c":
+            self.menu_settings(chat, msg)
+        elif step == "cs":
+            key, _, value = arg.partition("-")
+            if key in ("full_internet", "bot_only", "require_password") and value in ("0", "1"):
+                self.db.set_setting(key, value)
+            elif key in ("wc", "wd") and value.isdigit():
+                c, d = self.request_limits()
+                self.set_request_limits(int(value) if key == "wc" else c, int(value) if key == "wd" else d)
+            elif key == "update":
+                self.request_update()
+                self.menu_settings(chat, msg)
+                return "📲 ביקשתי מהטאבלטים לבדוק עדכון"
+            self.menu_settings(chat, msg)
+            return "נשמר"
+        elif step == "h":
+            for chunk in self.history_text(20):
+                self.reply(chat, chunk)
+        elif step == "help":
+            self.reply(chat, HELP, [self.nav()])
+        else:
+            self.main_menu(chat, msg)
+        return ""
+
+    def grant(self, chat: int, msg: dict | None, who: str, minutes: int) -> str:
+        """The parent opens a device for a kid without a request from the kid."""
+        st = self.menu_state.get(chat, {})
+        pc, kid, mode = st["pc"], st["kid"], st["mode"]
+        sid, ends = self.db.start_session(pc, kid, mode, minutes)
+        display = self.db.kid_display(kid)
+        # A request still waiting on that device is answered by this.
+        for r in self.db.q("SELECT * FROM requests WHERE pc=? AND kind='login' AND status='pending'", (pc,)):
+            self.db.x("UPDATE requests SET status='approved', decided_by=?, decided_at=?, session_id=? WHERE id=?",
+                      (who, time.time(), sid, r["id"]))
+            self.edit_all(json.loads(r["messages"]), f"✅ {self.db.kid_display(r['kid'])} ({pc}): נפתח מהתפריט "
+                                                     f"ל{display} ע\"י {who}")
+        length = "ללא הגבלת זמן" if minutes <= 0 else f"ל{fmt_min(minutes)}, עד {hhmm(ends)}"
+        text = f"▶️ {display} ({pc}): {MODES[mode]} {length} · נפתח ע\"י {who} בלי בקשה"
+        hint = ("\nבמחשב: {} נכנס/ת לחשבון שלו/ה ב-Windows והמסך נפתח לבד.".format(display)
+                if pc not in {d[0] for d in self.devices("tab")} else "")
+        self.show(chat, msg, f"✅ נפתח\n{text}{hint}",
+                  [[{"text": "🔒 לנעול", "callback_data": "m:s"}, {"text": "▶️ לפתוח עוד", "callback_data": "m:g"}],
+                   self.nav()])
+        if msg:
+            self.db.x("INSERT OR REPLACE INTO messages (chat, mid, ts, text, markup) VALUES (?,?,?,?,NULL)",
+                      (chat, msg["message_id"], time.time(), text))
+        others = [c for c in self.parents if c != chat]
+        if others:
+            self.notify(text, chats=others)
+        self.menu_state[chat] = {}
+        return "נפתח"
+
+    def menu_text_input(self, chat: int, text: str) -> None:
+        """A typed answer to a menu question: a custom time, or a site address."""
+        wanted = self.awaiting_time.pop(chat)
+        st = self.menu_state.get(chat, {})
+        if wanted == "mg":
+            minutes = parse_duration(text)
+            if not minutes:
+                self.awaiting_time[chat] = wanted
+                self.reply(chat, "לא הבנתי 🙂 למשל: 45, 2 שעות, 1.5ש או 18:30")
+                return
+            self.grant(chat, st.get("msg"), self.parent_name(chat), minutes)
+            return
+        lst = wanted.split(":")[1]
+        self.handle_command(chat, {"allow": "/allow", "block": "/block", "always": "/always"}[lst], text)
+
+    def menu_status(self, chat: int, msg: dict | None) -> None:
+        now = time.time()
+        live = [p["name"] for p in self.db.q("SELECT name FROM pcs ORDER BY name")
+                if (s := self.db.active_session(p["name"])) and s["ends"] > now]
+        self.menu_state.setdefault(chat, {})["live"] = live
+        kb = []
+        for i, pc in enumerate(live):
+            kb.append([{"text": f"🔒 {pc}", "callback_data": f"m:sl:{i}"}] +
+                      [{"text": f"+{fmt_min(m)}", "callback_data": f"m:se:{i}-{m}"} for m in self.cfg["extend_options"]])
+        if len(live) > 1:
+            kb.append([{"text": "🔒 לנעול הכל", "callback_data": "m:sa"}])
+        kb.append([{"text": "🔄 רענון", "callback_data": "m:s"}, {"text": "▶️ לפתוח לילד", "callback_data": "m:g"}])
+        self.show(chat, msg, self.status_text() + "\n" + time.strftime("(%H:%M:%S)"), kb + [self.nav()])
+
+    def menu_kids(self, chat: int, msg: dict | None) -> None:
+        kb = []
+        for k in self.db.q("SELECT * FROM kids WHERE role!='master' ORDER BY display"):
+            kb.append([{"text": k["display"], "callback_data": "m:k"},
+                       ({"text": "✅ להפעיל", "callback_data": f"m:ke:{k['username']}"} if k["disabled"] else
+                        {"text": "⛔ להשבית", "callback_data": f"m:kd:{k['username']}"}),
+                       {"text": "🔑 סיסמה זמנית", "callback_data": f"m:kr:{k['username']}"}])
+        self.show(chat, msg, self.kids_text()[:3900], kb + [self.nav()])
+
+    def menu_settings(self, chat: int, msg: dict | None) -> None:
+        def mark(on: bool, text: str) -> str:
+            return ("• " if on else "") + text
+        c, d = self.request_limits()
+        full, only, pw = self.full_internet_allowed(), self.bot_only(), self.passwords_required()
+        kb = [[{"text": mark(not full, "✅ רק אתרים מאושרים בבקשות"), "callback_data": "m:cs:full_internet-0"},
+               {"text": mark(full, "🌐 להציע גם אינטרנט מלא"), "callback_data": "m:cs:full_internet-1"}],
+              [{"text": mark(only, "🤖 כניסה רק בבקשה בבוט"), "callback_data": "m:cs:bot_only-1"},
+               {"text": mark(not only, "🔑 לפי סיסמאות"), "callback_data": "m:cs:bot_only-0"}]]
+        if not only:
+            kb.append([{"text": mark(pw, "🔑 עם סיסמה"), "callback_data": "m:cs:require_password-1"},
+                       {"text": mark(not pw, "👆 בלי סיסמה"), "callback_data": "m:cs:require_password-0"}])
+        kb.append([{"text": "המתנה אחרי ביטול:", "callback_data": "m:c"}] +
+                  [{"text": mark(c == m, str(m)), "callback_data": f"m:cs:wc-{m}"} for m in (0, 5, 10, 15)])
+        kb.append([{"text": "המתנה אחרי \"לא\":", "callback_data": "m:c"}] +
+                  [{"text": mark(d == m, str(m)), "callback_data": f"m:cs:wd-{m}"} for m in (0, 15, 30, 60)])
+        kb.append([{"text": "📲 לעדכן את האפליקציה בטאבלטים", "callback_data": "m:cs:update-"}])
+        text = ("⚙️ הגדרות (• = המצב הנוכחי)\n"
+                f"🌐 אינטרנט מלא בבקשות: {'מוצע' if full else 'לא מוצע'}\n"
+                f"🤖 כניסת ילדים: {'רק בבקשה בבוט' if only else 'עם סיסמה' if pw else 'בחירת שם'}\n"
+                f"⏳ המתנה לפני בקשה חדשה: {c} דק' אחרי ביטול, {d} דק' אחרי \"לא\"")
+        self.show(chat, msg, text, kb + [self.nav()])
 
     # ---- learning goals from the לימודים app (see learning_goals.py)
     def learning(self):
@@ -1569,7 +1888,8 @@ class WebAdmin:
         return {"ok": False, "error": "פעולה לא מוכרת"}
 
 
-HELP = """🛡️ HomeGuard – פקודות:
+HELP = """🛡️ HomeGuard – הכי פשוט: /menu או הכפתור "🏠 תפריט" – הכל בלחיצות.
+אפשר גם בפקודות:
 /status – מי מחובר ולכמה זמן
 /lock <מחשב> – לנעול עכשיו (בלי שם = כל המחשבים)
 /extend <מחשב> <דקות> – להוסיף זמן

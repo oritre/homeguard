@@ -900,6 +900,20 @@ class AgentEndToEnd(unittest.TestCase):
         with open(os.path.join(tmp, "frozen.json"), encoding="utf-8") as f:
             self.assertIn("noam", json.load(f))
 
+    def test_kid_desktop_copied_from_shared_account_once(self):
+        tmp = tempfile.mkdtemp()
+        self.agent.log_path = os.path.join(tmp, "agent.log")
+        calls = []
+        def seed(template, user):
+            calls.append((template, user))
+            return None if user == "dana" else {"copied": ["Minecraft.lnk"], "skipped": [], "failed": []}
+        self._patch_winctl(seed_desktop=seed)
+        self.agent.kid_users = {"noam": "נועם", "dana": "דנה"}
+        self.agent.seed_desktops()
+        self.agent.seed_desktops()
+        self.assertEqual(calls.count(("hagit", "noam")), 1)  # once only: after that it's noam's own
+        self.assertEqual(calls.count(("hagit", "dana")), 2)  # dana hasn't signed in yet: tried again
+
     def test_kid_account_never_gets_a_brothers_session(self):
         self.agent.kid_users = {"noam": "נועם", "dana": "דנה"}
         with self.agent.lock:
@@ -1137,6 +1151,96 @@ class WebAdminTest(unittest.TestCase):
         self.assertTrue(res["relogin"])
         self.token = new
         self.assertEqual(self.call("/admin/api/state")[0], 401)  # every session and token is gone
+
+
+class MenuTest(unittest.TestCase):
+    """The button menu: device type -> device -> kid -> what -> how long, without a request."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1, 2], agent_token="t", db=os.path.join(self.tmp, "db"))
+        self.db = hs.DB(cfg["db"])
+        self.db.add_kid("avishay", "1234", "אבישי")
+        self.db.add_kid("evyatar", "1234", "אביתר")
+        self.tg = FakeTelegram()
+        self.hg = hs.HomeGuard(cfg, self.db, self.tg)
+        self.hg.state("חדר ילדים", "hagit")
+        self.hg.state("טאבלט", "android", 12)
+        self.msg = {"message_id": 55, "chat": {"id": 1}}
+
+    def tap(self, data, chat=1):
+        self.hg.handle_update({"callback_query": {"id": "q", "data": data, "message": dict(self.msg, chat={"id": chat}),
+                                                  "from": {"first_name": "אורי"}}})
+        answers = [p for m, p in self.tg.calls if m == "answerCallbackQuery"]
+        return answers[-1]["text"] if answers else None
+
+    def last_keyboard(self):
+        edits = [p for m, p in self.tg.calls if m in ("editMessageText", "sendMessage") and "reply_markup" in p]
+        return edits[-1]["reply_markup"]["inline_keyboard"]
+
+    def test_menu_button_and_command_open_the_menu(self):
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "🏠 תפריט", "from": {"first_name": "אורי"}}})
+        texts = [p["text"] for p in self.tg.sent()]
+        self.assertTrue(any("תפריט ראשי" in t for t in texts))
+        self.assertTrue(any(p.get("reply_markup", {}).get("is_persistent") for p in self.tg.sent()))
+
+    def test_devices_split_into_pc_and_tablet(self):
+        self.assertEqual([d[0] for d in self.hg.devices("pc")], ["חדר ילדים"])
+        self.assertEqual([d[0] for d in self.hg.devices("tab")], ["טאבלט"])
+
+    def test_open_for_a_kid_without_a_request(self):
+        self.tap("m:g")
+        self.assertIn("m:gt:pc", str(self.last_keyboard()))
+        self.tap("m:gt:pc")  # only one PC: straight to the kids
+        self.assertIn("m:gk:avishay", str(self.last_keyboard()))
+        self.tap("m:gk:avishay")
+        self.tap("m:gm:allowlist")
+        self.assertEqual(self.tap("m:gx:60"), "נפתח")
+        s = self.hg.state("חדר ילדים", "avishay")["session"]
+        self.assertEqual((s["kid"], s["mode"]), ("avishay", "allowlist"))
+        self.assertGreater(s["remaining"], 3500)
+        self.assertTrue(any(p["chat_id"] == 2 and "נפתח" in p["text"] for p in self.tg.sent()))  # other parent told
+        self.assertIsNone(self.hg.state("טאבלט", "android", 12)["session"])
+
+    def test_custom_time_typed(self):
+        for d in ("m:g", "m:gt:tab", "m:gk:evyatar", "m:gm:offline", "m:gc"):
+            self.tap(d)
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "45", "from": {"first_name": "אורי"}}})
+        s = self.hg.state("טאבלט", "android", 12)["session"]
+        self.assertEqual((s["kid"], s["mode"]), ("evyatar", "offline"))
+        self.assertTrue(2600 < s["remaining"] <= 2700)
+
+    def test_pending_request_answered_by_menu(self):
+        self.db.set_setting("bot_only", "0")
+        rid = self.hg.login("חדר ילדים", "avishay", "1234")["request_id"]
+        for d in ("m:g", "m:gt:pc", "m:gk:avishay", "m:gm:allowlist", "m:gx:30"):
+            self.tap(d)
+        self.assertEqual(self.hg.request_status(rid)["status"], "approved")
+
+    def test_only_main_parent_uses_menu(self):
+        self.assertEqual(self.tap("m:g", chat=2), "התפריט זמין רק להורה הראשי")
+
+    def test_status_lock_and_extend_buttons(self):
+        for d in ("m:g", "m:gt:pc", "m:gk:avishay", "m:gm:allowlist", "m:gx:30"):
+            self.tap(d)
+        self.tap("m:s")
+        before = self.hg.state("חדר ילדים")["session"]["remaining"]
+        self.tap("m:se:0-15")
+        self.assertGreater(self.hg.state("חדר ילדים")["session"]["remaining"], before + 800)
+        self.tap("m:sl:0")
+        self.assertIsNone(self.hg.state("חדר ילדים")["session"])
+
+    def test_settings_and_sites(self):
+        self.tap("m:cs:full_internet-1")
+        self.assertTrue(self.hg.full_internet_allowed())
+        self.tap("m:cs:wd-30")
+        self.assertEqual(self.hg.request_limits()[1], 30)
+        self.tap("m:wa:allow")
+        self.hg.handle_update({"message": {"chat": {"id": 1}, "text": "khanacademy.org", "from": {"first_name": "אורי"}}})
+        self.assertIn("khanacademy.org", self.db.sites("allow"))
+        self.tap("m:wr")
+        self.tap("m:wx:0")
+        self.assertNotIn("khanacademy.org", self.db.sites("allow"))
 
 
 if __name__ == "__main__":
