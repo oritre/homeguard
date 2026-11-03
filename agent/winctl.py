@@ -6,6 +6,7 @@ be tested on any machine.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 
@@ -289,6 +290,56 @@ def ensure_kid_account(username: str, display: str) -> bool:
         f"Add-LocalGroupMember -SID 'S-1-5-32-545' -Member '{username}' -ErrorAction SilentlyContinue; "
         f"'created' }}")
     return "created" in out
+
+
+def profile_dir(username: str) -> str:
+    """The user's profile folder (C:\\Users\\<name>), or '' before their first sign-in."""
+    sid = user_sid(username)
+    if not sid:
+        return ""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" + "\\" + sid) as k:
+            path = os.path.expandvars(winreg.QueryValueEx(k, "ProfileImagePath")[0])
+    except OSError:
+        return ""
+    return path if os.path.isdir(path) else ""
+
+
+def seed_desktop(template: str, username: str) -> dict | None:
+    """Copy the template account's desktop (shortcuts, files, folders) to a kid's desktop, once.
+    Items already there are kept. A shortcut to a program inside the template account's own profile
+    (an app installed only for that user) would not open for the kid, so it is skipped and reported.
+    Returns None while either profile doesn't exist yet (the kid hasn't signed in)."""
+    if not IS_WIN:
+        return None
+    src, dst = profile_dir(template), profile_dir(username)
+    if not src or not dst:
+        return None
+    s, d = src.replace("'", "''"), dst.replace("'", "''")
+    out = powershell(
+        f"$src = '{s}'; $dst = Join-Path '{d}' 'Desktop'; "
+        "New-Item -ItemType Directory -Force -Path $dst | Out-Null; "
+        "$dirs = @(Join-Path $src 'Desktop') + @(Get-ChildItem -Path $src -Directory -Filter 'OneDrive*' "
+        "-ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem $_.FullName -Directory "
+        "-ErrorAction SilentlyContinue | Where-Object { $_.Name -in 'Desktop', 'שולחן העבודה' } } | "
+        "ForEach-Object { $_.FullName }); "
+        "$sh = New-Object -ComObject WScript.Shell; "
+        "foreach ($dir in $dirs) { if (-not (Test-Path $dir)) { continue }; "
+        "Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object { "
+        "$t = Join-Path $dst $_.Name; if (Test-Path -LiteralPath $t) { return }; "
+        "if ($_.Extension -eq '.lnk') { $target = $sh.CreateShortcut($_.FullName).TargetPath; "
+        "if ($target -and $target.StartsWith($src, 'OrdinalIgnoreCase')) { 'SKIP ' + $_.BaseName; return } }; "
+        "try { Copy-Item -LiteralPath $_.FullName -Destination $t -Recurse -Force -ErrorAction Stop; "
+        "'COPY ' + $_.Name } catch { 'FAIL ' + $_.Name } } }")
+    res = {"copied": [], "skipped": [], "failed": []}
+    for line in out.splitlines():
+        kind, _, name = line.strip().partition(" ")
+        key = {"COPY": "copied", "SKIP": "skipped", "FAIL": "failed"}.get(kind)
+        if key:
+            res[key].append(name)
+    return res
 
 
 def is_admin(username: str) -> bool:

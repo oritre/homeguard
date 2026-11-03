@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "diag_upload": True,               # send the agent log to the server, for troubleshooting from afar
     "home_wifi": [],                   # home Wi-Fi names to rejoin when the PC isn't connected (also learned)
     "kid_desktops": True,              # a Windows account per kid; a locked kid's programs are frozen, not closed
+    "desktop_template": "hagit",       # each kid's desktop starts as a one-time copy of this account's
     # Windows administrators are NOT exempt: the shared account the kids use (hagit) is an administrator.
     # Parents use the lock screen's master sign-in, or list their own account in exempt_users.
     "admins_exempt": False,
@@ -263,6 +264,26 @@ class Agent:
                 if winctl.ensure_kid_account(name, display):
                     log.info("Windows account created for %s (%s)", name, display)
                 self.accounts_made.add(name)
+        self.seed_desktops()
+
+    def seed_desktops(self) -> None:
+        """Each kid's desktop starts as a copy of the shared account's (desktop_template), once, right
+        after the kid's first sign-in; from then on every kid's desktop is their own."""
+        template = self.cfg["desktop_template"]
+        if not template:
+            return
+        seeded = self._load("seeded.json", [])
+        for name in self.kid_users:
+            if name in seeded or name == template.lower():
+                continue
+            res = winctl.seed_desktop(template, name)
+            if res is None:
+                continue  # no profile yet: after their first sign-in
+            log.info("desktop of %s copied from %s: %d items %s; skipped (installed only for %s): %s; failed: %s",
+                     name, template, len(res["copied"]), res["copied"], template, res["skipped"] or "none",
+                     res["failed"] or "none")
+            seeded.append(name)
+            self._save("seeded.json", seeded)
 
     def enforce_desktops(self) -> None:
         """Every kid's Windows session is frozen unless that kid is at the screen with approved time.
