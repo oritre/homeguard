@@ -900,19 +900,24 @@ class AgentEndToEnd(unittest.TestCase):
         with open(os.path.join(tmp, "frozen.json"), encoding="utf-8") as f:
             self.assertIn("noam", json.load(f))
 
-    def test_kid_desktop_copied_from_shared_account_once(self):
+    def test_kid_account_gets_shared_account_desktop_and_settings(self):
         tmp = tempfile.mkdtemp()
         self.agent.log_path = os.path.join(tmp, "agent.log")
-        calls = []
+        self.agent.cfg["sync_inline"] = True
+        calls, synced = [], []
         def seed(template, user):
             calls.append((template, user))
             return None if user == "dana" else {"copied": ["Minecraft.lnk"], "skipped": [], "failed": []}
-        self._patch_winctl(seed_desktop=seed)
+        self._patch_winctl(seed_desktop=seed,
+                           sync_profile=lambda t, u, d: synced.append((t, u)) or ["OK wallpaper"])
         self.agent.kid_users = {"noam": "נועם", "dana": "דנה"}
         self.agent.seed_desktops()
         self.agent.seed_desktops()
-        self.assertEqual(calls.count(("hagit", "noam")), 1)  # once only: after that it's noam's own
+        self.assertEqual(calls.count(("hagit", "noam")), 1)  # again only after SYNC_EVERY
+        self.assertEqual(synced, [("hagit", "noam")])
         self.assertEqual(calls.count(("hagit", "dana")), 2)  # dana hasn't signed in yet: tried again
+        with open(os.path.join(tmp, "synced.json"), encoding="utf-8") as f:
+            self.assertIn("noam", json.load(f))
 
     def test_kid_account_never_gets_a_brothers_session(self):
         self.agent.kid_users = {"noam": "נועם", "dana": "דנה"}
