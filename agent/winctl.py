@@ -37,12 +37,12 @@ if IS_WIN:
     _wtsapi.WTSDisconnectSession.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL]
 
 
-def run(cmd: list[str]) -> str:
+def run(cmd: list[str], timeout: int = 60) -> str:
     if not IS_WIN:
         log.info("[dry-run] %s", " ".join(cmd))
         return ""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW, timeout=60)
+        p = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW, timeout=timeout)
         if p.returncode != 0:
             log.warning("%s -> %s %s", cmd[0], p.returncode, (p.stdout + p.stderr).strip()[:300])
         return p.stdout
@@ -308,7 +308,7 @@ def profile_dir(username: str) -> str:
 
 
 def seed_desktop(template: str, username: str) -> dict | None:
-    """Copy the template account's desktop (shortcuts, files, folders) to a kid's desktop, once.
+    """Copy the template account's desktop (shortcuts, files, folders) to a kid's desktop.
     Items already there are kept. A shortcut to a program inside the template account's own profile
     (an app installed only for that user) would not open for the kid, so it is skipped and reported.
     Returns None while either profile doesn't exist yet (the kid hasn't signed in)."""
@@ -340,6 +340,18 @@ def seed_desktop(template: str, username: str) -> dict | None:
         if key:
             res[key].append(name)
     return res
+
+
+def sync_profile(template: str, username: str, app_dir: str) -> list[str]:
+    """Copy the template account's settings to a kid's account (profile-sync.ps1): one line per step."""
+    if not IS_WIN:
+        return []
+    script = os.path.join(app_dir, "profile-sync.ps1")
+    if not os.path.exists(script):
+        return ["FAIL profile-sync.ps1 missing"]
+    out = run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+               "-Template", template, "-Kid", username], timeout=300)
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def is_admin(username: str) -> bool:

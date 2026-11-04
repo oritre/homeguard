@@ -46,7 +46,7 @@ DEFAULT_CONFIG = {
     "diag_upload": True,               # send the agent log to the server, for troubleshooting from afar
     "home_wifi": [],                   # home Wi-Fi names to rejoin when the PC isn't connected (also learned)
     "kid_desktops": True,              # a Windows account per kid; a locked kid's programs are frozen, not closed
-    "desktop_template": "hagit",       # each kid's desktop starts as a one-time copy of this account's
+    "desktop_template": "hagit",       # every kid's account gets this account's desktop and settings
     # Windows administrators are NOT exempt: the shared account the kids use (hagit) is an administrator.
     # Parents use the lock screen's master sign-in, or list their own account in exempt_users.
     "admins_exempt": False,
@@ -266,24 +266,45 @@ class Agent:
                 self.accounts_made.add(name)
         self.seed_desktops()
 
+    SYNC_EVERY = 6 * 3600
+
     def seed_desktops(self) -> None:
-        """Each kid's desktop starts as a copy of the shared account's (desktop_template), once, right
-        after the kid's first sign-in; from then on every kid's desktop is their own."""
+        """Every kid's account looks and works like the shared account's (desktop_template): its desktop
+        items, wallpaper, theme, taskbar, keyboard languages, default apps and Brave bookmarks. Right
+        after a kid's first sign-in, then every few hours (the template wins; a kid's extra desktop
+        items stay). Runs in the background: loading a registry and copying files take a while."""
         template = self.cfg["desktop_template"]
-        if not template:
+        if not template or getattr(self, "_syncing", False):
             return
-        seeded = self._load("seeded.json", [])
-        for name in self.kid_users:
-            if name in seeded or name == template.lower():
-                continue
-            res = winctl.seed_desktop(template, name)
-            if res is None:
-                continue  # no profile yet: after their first sign-in
-            log.info("desktop of %s copied from %s: %d items %s; skipped (installed only for %s): %s; failed: %s",
-                     name, template, len(res["copied"]), res["copied"], template, res["skipped"] or "none",
-                     res["failed"] or "none")
-            seeded.append(name)
-            self._save("seeded.json", seeded)
+        synced = self._load("synced.json", {})
+        due = [n for n in self.kid_users if n != template.lower() and
+               time.time() - synced.get(n, 0) > self.SYNC_EVERY]
+        if not due:
+            return
+        self._syncing = True
+
+        def work():
+            try:
+                for name in due:
+                    res = winctl.seed_desktop(template, name)
+                    if res is None:
+                        continue  # no profile yet: after their first sign-in
+                    log.info("desktop of %s copied from %s: %d new items %s; skipped (installed only for %s): "
+                             "%s; failed: %s", name, template, len(res["copied"]), res["copied"], template,
+                             res["skipped"] or "none", res["failed"] or "none")
+                    lines = winctl.sync_profile(template, name, self.app_dir)
+                    log.info("settings of %s copied from %s: %s", name, template, " | ".join(lines) or "nothing")
+                    synced[name] = time.time()
+                    self._save("synced.json", synced)
+            except Exception:
+                log.exception("profile sync failed")
+            finally:
+                self._syncing = False
+
+        if self.cfg.get("sync_inline"):
+            work()
+        else:
+            threading.Thread(target=work, daemon=True).start()
 
     def enforce_desktops(self) -> None:
         """Every kid's Windows session is frozen unless that kid is at the screen with approved time.
