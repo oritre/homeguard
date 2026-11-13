@@ -20,17 +20,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import os
+import queue
 import re
 import secrets
+import socket
 import sqlite3
+import ssl
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -303,22 +305,100 @@ class DB:
 # --------------------------------------------------------------------- Telegram
 
 class Telegram:
-    def __init__(self, token: str):
-        self.base = f"https://api.telegram.org/bot{token}/"
+    """Bot API client. Each thread keeps one open HTTPS connection to Telegram (keep-alive), so a
+    button tap costs one quick round trip instead of a new DNS lookup + TCP + TLS handshake per call.
+    That handshake is what made taps answer late, and a stuck one made the bot go silent for minutes."""
+    HOST = "api.telegram.org"
+    PORT = 443
+
+    def __init__(self, token: str, ipv4_only: bool = True):
+        self.path = f"/bot{token}/"
+        self.ipv4_only = ipv4_only
+        self._local = threading.local()
+        self._addrs: list = []  # last good IPv4 addresses, used when the Pi's DNS hiccups
+
+    def _addresses(self) -> list:
+        try:
+            self._addrs = [a[4] for a in socket.getaddrinfo(self.HOST, self.PORT, socket.AF_INET, socket.SOCK_STREAM)]
+        except socket.gaierror:
+            if not self._addrs:
+                raise
+            log.warning("DNS lookup for %s failed, using the last known address", self.HOST)
+        return self._addrs
+
+    def _connect(self, timeout: float) -> http.client.HTTPSConnection:
+        conn = http.client.HTTPSConnection(self.HOST, self.PORT, timeout=timeout, context=ssl.create_default_context())
+        if self.ipv4_only:
+            # The Pi's add-on network has an IPv6 default route with no internet behind it, and its DNS
+            # fails now and then (bursts of "Try again"). Connect over IPv4, to the last good address
+            # when DNS is down.
+            def ipv4_socket():
+                last = None
+                for addr in self._addresses():
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.settimeout(min(timeout, 10))
+                    try:
+                        sock.connect(addr)
+                        sock.settimeout(timeout)
+                        return sock
+                    except OSError as e:
+                        sock.close()
+                        last = e
+                raise last or OSError("no IPv4 address for " + self.HOST)
+
+            def connect():
+                conn.sock = conn._context.wrap_socket(ipv4_socket(), server_hostname=self.HOST)
+            conn.connect = connect
+        return conn
 
     def call_raw(self, method: str, **params) -> dict:
-        """The whole Telegram reply, including the error description when it fails."""
+        """The whole Telegram reply, including the error description when it fails.
+        Raises OSError / http.client.HTTPException when Telegram can't be reached."""
+        timeout = params.get("timeout", 0) + 10
         data = json.dumps(params).encode()
-        req = urllib.request.Request(self.base + method, data=data,
-                                     headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=params.get("timeout", 0) + 15) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            return json.loads(e.read() or b"{}")
+        for attempt in range(2):
+            conn = getattr(self._local, "conn", None)
+            reused = conn is not None
+            if conn is None:
+                conn = self._local.conn = self._connect(timeout)
+            conn.timeout = timeout
+            if conn.sock:
+                conn.sock.settimeout(timeout)
+            try:
+                conn.request("POST", self.path + method, data, {"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                raw = resp.read()
+            except (OSError, http.client.HTTPException) as e:
+                conn.close()
+                self._local.conn = None
+                # A kept-alive connection the other side already closed: open a fresh one once.
+                stale = isinstance(e, (http.client.RemoteDisconnected, ConnectionResetError,
+                                       BrokenPipeError, http.client.CannotSendRequest))
+                if reused and stale and attempt == 0:
+                    continue
+                raise
+            if resp.will_close:
+                conn.close()
+                self._local.conn = None
+            try:
+                return json.loads(raw or b"{}")
+            except ValueError:
+                return {"ok": False, "description": f"HTTP {resp.status}: {raw[:200]!r}"}
+        return {"ok": False, "description": "unreachable"}
 
     def call(self, method: str, **params):
-        body = self.call_raw(method, **params)
+        """The result, or None when it failed (logged). Never raises, so one failed call doesn't
+        stop the rest of a button's work, nor the answer to the tap."""
+        started = time.monotonic()
+        try:
+            body = self.call_raw(method, **params)
+        except (OSError, http.client.HTTPException) as e:
+            log.warning("telegram %s: no connection (%s) after %.1fs", method, e, time.monotonic() - started)
+            return None
+        took = time.monotonic() - started
+        if took > 5 and method != "getUpdates":
+            log.warning("telegram %s took %.1fs", method, took)
         if not body.get("ok"):
             log.warning("telegram %s failed: %s", method, body)
             return None
@@ -946,24 +1026,19 @@ class HomeGuard:
             who = cq["from"].get("first_name", "הורה")
             self.remember_name(chat, who)
             data = cq.get("data", "")
-            if data.startswith("m:"):
-                answer = self.menu_callback(chat, data, cq.get("message"), who)
-            elif data.startswith(("cu:", "cx:", "cs:")):
-                answer = self.ask_custom_time(chat, data)
-            elif data.startswith("lk:"):
-                pc = data[3:]
-                answer = "ננעל" if self.lock(pc) else "כבר נעול"
-            elif data.startswith("ai:"):
-                rows = self.db.q("SELECT * FROM apps WHERE id=?", (int(data[3:]),))
-                answer = f"{rows[0]['label']}: {self.APP_RULES[rows[0]['rule']]}" if rows else "לא נמצא"
-            elif data.startswith("ar:"):
-                _, app_id, rule = data.split(":")
-                answer = self.set_app_rule(int(app_id), rule)
-                self.refresh_app_row(cq, int(app_id))
-            else:
-                answer = self.decide(data, who, chat)
+            # The tap's spinner stays until the tap is answered. Normally the answer (with its short
+            # notice) goes out at the end; if the work takes longer, stop the spinner meanwhile.
+            answered = threading.Lock()
+            early = threading.Timer(self.TAP_ANSWER_AFTER, self._answer_tap, (cq["id"], "", answered))
+            early.daemon = True
             if self.tg:
-                self.tg.call("answerCallbackQuery", callback_query_id=cq["id"], text=answer)
+                early.start()
+            answer = ""
+            try:
+                answer = self._tap(cq, chat, who, data)
+            finally:
+                early.cancel()
+                self._answer_tap(cq["id"], answer, answered)
             return
         msg = upd.get("message")
         if not msg or "text" not in msg:
@@ -990,6 +1065,34 @@ class HomeGuard:
             return
         self.awaiting_time.pop(chat, None)
         self.handle_command(chat, cmd, arg)
+
+    TAP_ANSWER_AFTER = 1.5  # seconds
+
+    def _answer_tap(self, cq_id: str, text: str, answered: threading.Lock) -> None:
+        """Answer a tap once: whichever of the early timer and the end of the work comes first."""
+        if not self.tg or not answered.acquire(blocking=False):
+            return
+        self.tg.call("answerCallbackQuery", callback_query_id=cq_id, text=text)
+
+    def _tap(self, cq: dict, chat: int, who: str, data: str) -> str:
+        """Do what a button asks; returns the short notice shown on the tap."""
+        if data.startswith("m:"):
+            answer = self.menu_callback(chat, data, cq.get("message"), who)
+        elif data.startswith(("cu:", "cx:", "cs:")):
+            answer = self.ask_custom_time(chat, data)
+        elif data.startswith("lk:"):
+            pc = data[3:]
+            answer = "ננעל" if self.lock(pc) else "כבר נעול"
+        elif data.startswith("ai:"):
+            rows = self.db.q("SELECT * FROM apps WHERE id=?", (int(data[3:]),))
+            answer = f"{rows[0]['label']}: {self.APP_RULES[rows[0]['rule']]}" if rows else "לא נמצא"
+        elif data.startswith("ar:"):
+            _, app_id, rule = data.split(":")
+            answer = self.set_app_rule(int(app_id), rule)
+            self.refresh_app_row(cq, int(app_id))
+        else:
+            answer = self.decide(data, who, chat)
+        return answer
 
     def refresh_app_row(self, cq: dict, app_id: int) -> None:
         """Move the "•" mark in the tapped message to the rule just chosen."""
@@ -2195,21 +2298,54 @@ def run(cfg: dict) -> None:
 
     threading.Thread(target=learner, daemon=True).start()
 
+    # Updates are handled on their own thread, so a slow button never holds up reading the next ones
+    # (in order, one at a time, like before).
+    updates_q: queue.Queue = queue.Queue()
+
+    def handler():
+        while True:
+            upd = updates_q.get()
+            started = time.monotonic()
+            try:
+                hg.handle_update(upd)
+            except Exception:
+                log.exception("update failed")
+            took = time.monotonic() - started
+            if took > 5:
+                log.warning("handling update %s took %.1fs", upd.get("update_id"), took)
+
+    threading.Thread(target=handler, daemon=True).start()
+    poll(tg, updates_q.put)
+
+
+def poll(tg: Telegram, deliver, stop=lambda: False) -> None:
+    """Long-poll Telegram for new messages and taps. A short long-poll (25s) means a connection that
+    died silently is noticed within ~35s; after a failure retry quickly (1s, 2s, 4s ... up to 30s)."""
     offset = 0
+    failures = 0
+    down_since = None
     log.info("Telegram bot polling")
-    while True:
+    while not stop():
         try:
-            updates = tg.call("getUpdates", offset=offset, timeout=50,
-                              allowed_updates=["message", "callback_query"]) or []
-            for upd in updates:
-                offset = upd["update_id"] + 1
-                try:
-                    hg.handle_update(upd)
-                except Exception:
-                    log.exception("update failed")
-        except Exception:
-            log.exception("polling failed")
-            time.sleep(5)
+            body = tg.call_raw("getUpdates", offset=offset, timeout=25,
+                               allowed_updates=["message", "callback_query"])
+            if not body.get("ok"):
+                raise RuntimeError(body.get("description") or body)
+        except Exception as e:
+            failures += 1
+            if down_since is None:
+                down_since = time.monotonic()
+            wait = min(30, 2 ** (failures - 1))
+            log.warning("polling failed (%s), attempt %d, retrying in %ds", e, failures, wait)
+            time.sleep(wait)
+            continue
+        if down_since is not None:
+            log.warning("Telegram reachable again after %.0fs (%d failed attempts)",
+                        time.monotonic() - down_since, failures)
+            failures, down_since = 0, None
+        for upd in body.get("result") or []:
+            offset = upd["update_id"] + 1
+            deliver(upd)
 
 
 def cli(argv: list[str]) -> None:
