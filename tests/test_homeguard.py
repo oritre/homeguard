@@ -1158,6 +1158,70 @@ class WebAdminTest(unittest.TestCase):
         self.assertEqual(self.call("/admin/api/state")[0], 401)  # every session and token is gone
 
 
+class TelegramReliabilityTest(unittest.TestCase):
+    """Slow button answers: taps must be answered fast, polling must recover quickly."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        cfg = dict(hs.DEFAULT_CONFIG, parent_chat_ids=[1], agent_token="t", db=os.path.join(self.tmp, "db"))
+        self.tg = FakeTelegram()
+        self.hg = hs.HomeGuard(cfg, hs.DB(cfg["db"]), self.tg)
+
+    def tap(self, data):
+        self.hg.handle_update({"callback_query": {"id": "c", "from": {"id": 1, "first_name": "אורי"},
+                                                  "message": {"chat": {"id": 1}, "message_id": 5}, "data": data}})
+
+    def test_slow_tap_spinner_stops_early_and_answered_once(self):
+        self.hg.TAP_ANSWER_AFTER = 0.05
+        self.hg.lock = lambda pc: time.sleep(0.3) or True
+        self.tap("lk:salon")
+        answers = self.tg.sent("answerCallbackQuery")
+        self.assertEqual(len(answers), 1)
+        self.assertEqual(answers[0]["text"], "")
+
+    def test_fast_tap_answered_with_notice(self):
+        self.tap("lk:salon")
+        self.assertEqual([a["text"] for a in self.tg.sent("answerCallbackQuery")], ["כבר נעול"])
+
+    def test_failing_tap_still_answered(self):
+        def boom(pc):
+            raise RuntimeError("x")
+        self.hg.lock = boom
+        with self.assertRaises(RuntimeError):
+            self.tap("lk:salon")
+        self.assertEqual(len(self.tg.sent("answerCallbackQuery")), 1)
+
+    def test_call_never_raises(self):
+        tg = hs.Telegram("1:x")
+        def down(method, **params):
+            raise OSError("network unreachable")
+        tg.call_raw = down
+        self.assertIsNone(tg.call("sendMessage", chat_id=1, text="x"))
+
+    def test_poll_retries_fast_then_delivers(self):
+        replies = [OSError("reset"), {"ok": False, "description": "502 Bad Gateway"},
+                   {"ok": True, "result": [{"update_id": 7}, {"update_id": 8}]}]
+        offsets, got, sleeps = [], [], []
+
+        class TG:
+            def call_raw(self, method, **params):
+                offsets.append(params["offset"])
+                r = replies.pop(0) if replies else {"ok": True, "result": []}
+                if isinstance(r, Exception):
+                    raise r
+                return r
+
+        real_sleep = hs.time.sleep
+        hs.time.sleep = sleeps.append
+        try:
+            hs.poll(TG(), got.append, stop=lambda: len(offsets) >= 4)
+        finally:
+            hs.time.sleep = real_sleep
+        self.assertEqual(sleeps, [1, 2])
+        self.assertEqual([u["update_id"] for u in got], [7, 8])
+        self.assertEqual(offsets[-1], 9)
+
+
 class MenuTest(unittest.TestCase):
     """The button menu: device type -> device -> kid -> what -> how long, without a request."""
 
