@@ -172,7 +172,8 @@ def insights(data: dict, pid: str, rng: tuple[str, str], subject: str = "all") -
     sessions = pick(data["sessions"])
     answers = [a for a in pick(data["attempts"]) if a.get("outcome") != "skipped"]
     results = pick(data["results"])
-    active = sum(s.get("active_s") or 0 for s in sessions)
+    # A replay of a lesson already mastered isn't learning time (app v56, insights.js).
+    active = sum(s.get("active_s") or 0 for s in sessions if s.get("repeat") != "mastered")
     opened = sum(s.get("open_s") or 0 for s in sessions)
     groups: dict = {}
     for a in sorted(answers, key=lambda a: a.get("at") or 0):

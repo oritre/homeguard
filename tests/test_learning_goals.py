@@ -56,6 +56,11 @@ class RulesTest(unittest.TestCase):
         self.assertIsNone(x["quality"])
         self.assertEqual(lg.insights(DATA, "k1", (T, T), "know")["active_min"], 2)
 
+    def test_mastered_repeat_is_not_learning_time(self):
+        # App v56: replaying a lesson already mastered is kept out of the minutes.
+        data = dict(DATA, sessions=DATA["sessions"] + [dict(sess("s1l1", 900, 900), repeat="mastered")])
+        self.assertEqual(round(lg.insights(data, "k1", (T, T))["active_min"]), 17)
+
     def test_periods_and_subjects(self):
         self.assertEqual(lg.period_range("week", "2026-10-28"), ("2026-10-25", "2026-10-31"))
         self.assertEqual(lg.period_range("lastweek", "2026-10-28"), ("2026-10-18", "2026-10-24"))
