@@ -900,6 +900,39 @@ class AgentEndToEnd(unittest.TestCase):
         with open(os.path.join(tmp, "frozen.json"), encoding="utf-8") as f:
             self.assertIn("noam", json.load(f))
 
+    def test_browsers_closed_when_kid_returns_with_less_internet(self):
+        """A web game loaded with approved sites must not keep running after a no-internet approval."""
+        tmp = tempfile.mkdtemp()
+        self.agent.log_path = os.path.join(tmp, "agent.log")
+        killed = []
+        self._patch_winctl(
+            sessions=lambda: {1: self.user},
+            session_processes=lambda sid, name: [(10, "brave.exe"), (11, "explorer.exe"), (12, "Minecraft.exe")],
+            suspend=lambda pid, resume=False: True,
+            kill=lambda pid: killed.append(pid) or True)
+        self.user = "hagit"  # the shared account: not frozen, so only this protects it
+
+        def approve(mode):
+            self.hg.lock("salon")
+            self.agent.poll_once()
+            res = self.local_call("POST", "/login", {"username": "noam", "password": "1234"})
+            self.hg.decide(f"ap:{res['request_id']}:{mode}:30", "parent")
+            self.agent.poll_once()
+
+        approve("allowlist")
+        self.assertEqual(killed, [10])  # no history yet: counts as full internet
+        killed.clear()
+        approve("allowlist")
+        self.assertEqual(killed, [])  # same internet as last time: browsers keep their tabs
+        approve("offline")
+        self.assertEqual(killed, [10])  # less internet: only the browser closes
+        killed.clear()
+        self.agent.poll_once()
+        approve("full")
+        self.assertEqual(killed, [])
+        with open(os.path.join(tmp, "browsers.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"hagit": "full"})
+
     def test_kid_account_gets_shared_account_desktop_and_settings(self):
         tmp = tempfile.mkdtemp()
         self.agent.log_path = os.path.join(tmp, "agent.log")

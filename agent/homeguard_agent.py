@@ -63,6 +63,15 @@ KEEP_RUNNING = {
 }
 
 
+# Browsers are closed (not frozen) when a kid comes back with less internet than the browser last had:
+# a page or web game that was already loaded keeps working without the network, so freezing it would
+# carry the earlier approval over. Other programs are frozen as before.
+BROWSERS = {"brave.exe", "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "vivaldi.exe",
+            "chromium.exe", "iexplore.exe"}
+# How much internet each mode gives, from least to most.
+MODE_RANK = {"offline": 0, "allowlist": 1, "full": 2, "open": 3}
+
+
 class Agent:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -87,6 +96,7 @@ class Agent:
         self.kids_checked = 0.0
         self.accounts_made: set[str] = set()
         self.frozen: dict[str, dict] = {}  # Windows user -> {"session": id, "pids": [[pid, name], ...]}
+        self.browser_mode: dict[str, str] = {}  # Windows user -> the mode their browsers last ran under
         self.admins: dict[str, bool] = {}
         self.unhardened: set[str] = set()
         self.console_since = 0.0  # when whoever is at the screen signed in (user_since also moves on logoff)
@@ -222,8 +232,27 @@ class Agent:
             with self.lock:
                 self.server_state, self.state_time = st, time.time()
         self.apply()
+        if self.user and not self.is_exempt(self.user) and self.session_for(self.user) is not None:
+            self.close_stale_browsers(self.session_id, self.user)  # before the kid's programs unfreeze
         self.watchdog()
         self.enforce_desktops()
+
+    def close_stale_browsers(self, sid, user: str) -> None:
+        """The kid at the screen has approved time. If their browsers last ran with more internet than
+        now (e.g. approved sites last time, no internet now), close them: a page already loaded, like a
+        web game, would otherwise keep working without the network. Unknown history counts as full."""
+        key = user.lower()
+        mode = self.current_mode()
+        seen = self.browser_mode.get(key, "full")
+        if MODE_RANK.get(mode, 0) < MODE_RANK.get(seen, 2):
+            closed = [prog for pid, prog in winctl.session_processes(sid, user)
+                      if prog.lower() in BROWSERS and winctl.kill(pid)]
+            if closed:
+                log.info("closed %d browser processes of %s (%s -> %s): %s", len(closed), user, seen, mode,
+                         ", ".join(sorted(set(closed))))
+        if seen != mode or key not in self.browser_mode:
+            self.browser_mode[key] = mode
+            self._save("browsers.json", self.browser_mode)
 
     # --------------------------------------------------------- kids' desktops
     def _data_path(self, name: str) -> str:
@@ -580,6 +609,7 @@ class Agent:
         server_ip = urlparse(self.cfg["server_url"]).hostname or ""
         self.kid_users = self._load("kids.json", {})
         self.frozen = self._load("frozen.json", {})
+        self.browser_mode = self._load("browsers.json", {})
         winctl.keep_wifi_connected()
         winctl.firewall_setup(server_ip, self.cfg["upstream_dns"])
         winctl.internet(False)

@@ -31,6 +31,7 @@ if IS_WIN:
         wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p]
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
     _ntdll = ctypes.WinDLL("ntdll")
     _ntdll.NtSuspendProcess.argtypes = [wintypes.HANDLE]
     _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
@@ -272,6 +273,19 @@ def suspend(pid: int, resume: bool = False) -> bool:
     try:
         fn = _ntdll.NtResumeProcess if resume else _ntdll.NtSuspendProcess
         return fn(h) == 0
+    finally:
+        _kernel32.CloseHandle(h)
+
+
+def kill(pid: int) -> bool:
+    """End a program at once (works on a frozen one too)."""
+    if not IS_WIN:
+        return False
+    h = _kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+    if not h:
+        return False
+    try:
+        return bool(_kernel32.TerminateProcess(h, 1))
     finally:
         _kernel32.CloseHandle(h)
 
