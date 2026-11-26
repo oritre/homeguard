@@ -656,6 +656,20 @@ class DnsTest(unittest.TestCase):
         self.assertFalse(dnsfilter.is_allowed("other.github.io", "full", allow, block, always))
         self.assertFalse(dnsfilter.is_allowed("wikipedia.org", "offline", allow, block, always))
 
+    def test_blocked_site_blocks_its_own_services(self):
+        # live tablet rules: youtube.com blocked, googleapis.com always open (English app, Gemini)
+        block, always = ["facebook.com", "tiktok.com", "youtube.com"], ["googleapis.com", "gstatic.com"]
+        for mode in ("full", "allowlist", "offline"):
+            for d in ("youtubei.googleapis.com", "rr1---sn-x.googlevideo.com", "i.ytimg.com", "youtu.be",
+                      "youtube.googleapis.com", "v16m.tiktokcdn.com"):
+                self.assertFalse(dnsfilter.is_allowed(d, mode, [], block, always), (d, mode))
+            for d in ("firestore.googleapis.com", "generativelanguage.googleapis.com", "fonts.gstatic.com"):
+                self.assertTrue(dnsfilter.is_allowed(d, mode, [], block, always), (d, mode))
+        self.assertTrue(dnsfilter.is_allowed("youtubei.googleapis.com", "open", [], block, always))
+        self.assertTrue(dnsfilter.is_allowed("i.ytimg.com", "full", [], ["tiktok.com"], always))  # not blocked
+        # an always entry at least as specific as the service still wins
+        self.assertTrue(dnsfilter.is_allowed("i.ytimg.com", "full", [], block, ["ytimg.com"]))
+
     def test_update_hosts_resolve_when_offline_only(self):
         self.assertTrue(dnsfilter.is_allowed("api.github.com", "offline", [], []))
         self.assertTrue(dnsfilter.is_allowed("codeload.github.com.", "offline", [], []))

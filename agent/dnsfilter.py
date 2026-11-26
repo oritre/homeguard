@@ -24,6 +24,16 @@ DEPENDENCIES = {
     "microsoft.com": ["live.com", "microsoftonline.com", "msauth.net", "msftauth.net"],
     "office.com": ["office.net", "live.com", "microsoftonline.com", "msauth.net", "msftauth.net", "officeapps.live.com"],
 }
+# Services that belong only to a site, so blocking the site blocks them too. Without this the YouTube app
+# kept working with youtube.com blocked: it talks to youtubei.googleapis.com, which "always: googleapis.com"
+# let through. These win over a broader "always" entry; an equally specific one still wins over them.
+BLOCK_DEPENDENCIES = {
+    "youtube.com": ["youtu.be", "ytimg.com", "googlevideo.com", "ggpht.com", "youtube-nocookie.com",
+                    "youtubekids.com", "youtubei.googleapis.com", "youtube.googleapis.com",
+                    "youtubeembeddedplayer.googleapis.com"],
+    "tiktok.com": ["tiktokv.com", "tiktokcdn.com", "tiktokcdn-us.com", "ttwstatic.com", "byteoversea.com",
+                   "ibytedtos.com", "musical.ly"],
+}
 # Always resolvable, so Windows doesn't show "no internet" and keeps the clock right.
 ESSENTIAL = ["msftconnecttest.com", "msftncsi.com", "time.windows.com"]
 # The agent's auto-update (install/update-agent.ps1) reads these while the internet is off. They resolve,
@@ -40,6 +50,27 @@ def matches(domain: str, patterns) -> bool:
     return False
 
 
+def best_match(domain: str, patterns) -> int:
+    """Length of the most specific pattern the domain falls under, or -1."""
+    domain = domain.lower().rstrip(".")
+    best = -1
+    for p in patterns:
+        p = p.lower().strip(".")
+        if p and (domain == p or domain.endswith("." + p)):
+            best = max(best, len(p))
+    return best
+
+
+def block_dependencies(block) -> list[str]:
+    out = []
+    for d in block:
+        d = d.lower().strip(".")
+        for base, deps in BLOCK_DEPENDENCIES.items():
+            if d == base or base.endswith("." + d):
+                out.extend(deps)
+    return out
+
+
 def expand_allowlist(allow: list[str]) -> list[str]:
     out = list(allow) + ESSENTIAL
     for d in allow:
@@ -54,7 +85,11 @@ def is_allowed(domain: str, mode: str, allow: list[str], block: list[str], alway
     always: sites the parents keep open in every mode, even with the internet off."""
     if mode == "open":
         return True
-    if always and matches(domain, expand_allowlist(list(always))):
+    always_hit = best_match(domain, expand_allowlist(list(always))) if always else -1
+    dep_hit = best_match(domain, block_dependencies(block))
+    if dep_hit > always_hit:
+        return False  # a blocked site's own service (the YouTube app's API, its videos)
+    if always_hit >= 0:
         return True
     if mode == "offline":
         return matches(domain, ESSENTIAL) or domain.lower().rstrip(".") in UPDATE_HOSTS
