@@ -61,14 +61,16 @@ object AppControl {
     /**
      * blocked: never open. always: open in every mode and keep their own internet (outside the VPN).
      * Every other app opens only while the kid has approved internet, so in a "no internet"
-     * session ([offline]) they are suspended too. Returns true when the always-set changed.
+     * session ([offline]) they are suspended too. unfiltered: apps that skip the site filter right now
+     * ("free" apps while the kid has full internet). Returns true when the set outside the VPN changed.
      */
     @Synchronized
     fun apply(ctx: Context, blocked: Set<String>, always: Set<String>, offline: Boolean,
-              alwaysSites: Boolean = false): Boolean {
+              alwaysSites: Boolean = false, unfiltered: Set<String> = emptySet()): Boolean {
         val prefs = Prefs(ctx)
-        val alwaysChanged = FilterVpn.bypassApps != always
-        FilterVpn.bypassApps = always
+        val bypass = always + unfiltered
+        val alwaysChanged = FilterVpn.bypassApps != bypass
+        FilterVpn.bypassApps = bypass
         if (prefs.alwaysApps != always) prefs.alwaysApps = always
 
         if (!AdminReceiver.isOwner(ctx)) return alwaysChanged

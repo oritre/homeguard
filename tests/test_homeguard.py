@@ -1049,7 +1049,7 @@ class AndroidAppsTest(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertIn("com.roblox.client", msgs[0]["text"])
         data = [b["callback_data"] for b in msgs[0]["reply_markup"]["inline_keyboard"][0]]
-        self.assertEqual([d.split(":")[2] for d in data], ["blocked", "always", "ok"])
+        self.assertEqual([d.split(":")[2] for d in data], ["blocked", "always", "ok", "free"])
 
     def test_rules_reach_the_device_state(self):
         self.hg.report_apps("tablet", self.apps("com.whatsapp", "com.roblox.client"))
@@ -1059,7 +1059,11 @@ class AndroidAppsTest(unittest.TestCase):
                                                       "inline_keyboard": [self.hg.app_buttons(
                                                           self.db.q("SELECT * FROM apps WHERE pkg='com.roblox.client'")[0])]}}}})
         self.hg.set_app_rule(ids["com.whatsapp"], "always")
+        self.hg.report_apps("tablet", self.apps("com.whatsapp", "com.roblox.client", "org.schabi.newpipe"))
+        ids = {r["pkg"]: r["id"] for r in self.db.q("SELECT id, pkg FROM apps")}
+        self.assertIn("חופשית", self.hg.set_app_rule(ids["org.schabi.newpipe"], "free"))
         st = self.hg.state("tablet", "android", 7)
+        self.assertEqual(st["apps_free"], ["org.schabi.newpipe"])
         self.assertEqual(st["apps_blocked"], ["com.roblox.client"])
         self.assertEqual(st["apps_always"], ["com.whatsapp"])
         edited = self.tg.sent("editMessageReplyMarkup")[-1]["reply_markup"]["inline_keyboard"][0]
@@ -1316,6 +1320,25 @@ class MenuTest(unittest.TestCase):
         self.assertEqual((s["kid"], s["mode"]), ("avishay", "allowlist"))
         self.assertGreater(s["remaining"], 3500)
         self.assertTrue(any(p["chat_id"] == 2 and "נפתח" in p["text"] for p in self.tg.sent()))  # other parent told
+        self.assertIsNone(self.hg.state("טאבלט", "android", 12)["session"])
+
+    def test_open_for_master_from_menu(self):
+        self.db.add_kid("hagit", "secret", "חגית", role="master")
+        self.tap("m:g")
+        self.tap("m:gt:tab")
+        self.assertIn("🔓 חגית (מאסטר)", str(self.last_keyboard()))
+        self.tap("m:gk:hagit")  # master skips the "what to open" step
+        kb = str(self.last_keyboard())
+        self.assertIn("m:gx:0", kb)
+        self.assertNotIn("m:gm:full", kb)
+        self.assertEqual(self.tap("m:gx:30"), "נפתח")
+        s = self.hg.state("טאבלט", "android", 12)["session"]
+        self.assertEqual((s["kid"], s["mode"]), ("hagit", "open"))
+        self.assertTrue(1700 < s["remaining"] <= 1800)
+
+    def test_kid_cannot_get_open_mode_from_menu(self):
+        for d in ("m:g", "m:gt:tab", "m:gk:evyatar", "m:gm:open", "m:gx:30"):
+            self.tap(d)
         self.assertIsNone(self.hg.state("טאבלט", "android", 12)["session"])
 
     def test_custom_time_typed(self):

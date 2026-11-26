@@ -201,7 +201,9 @@ class GuardService : Service() {
                 blocked = if (mode == "open") emptySet() else list("apps_blocked").toSet(),
                 always = list("apps_always").toSet(),
                 offline = s != null && mode == "offline",
-                alwaysSites = always.isNotEmpty())
+                alwaysSites = always.isNotEmpty(),
+                // "free" apps (e.g. NewPipe) skip the site filter only in full internet
+                unfiltered = if (s != null && mode == "full") list("apps_free").toSet() else emptySet())
         }
         val changed = FilterVpn.mode != mode || shapeChanged || appsChanged
         FilterVpn.mode = mode

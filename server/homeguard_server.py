@@ -764,6 +764,7 @@ class HomeGuard:
                 "blocklist": [d for d in self.db.sites("block") if d not in temp_allowed],
                 "apps_blocked": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='blocked'")],
                 "apps_always": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='always'")],
+                "apps_free": [r["pkg"] for r in self.db.q("SELECT pkg FROM apps WHERE rule='free'")],
                 "apps_nonet": [],  # rule retired; kept empty for app versions up to 8
                 "update_seq": int(self.db.setting("update_seq", "0")),
                 "server_time": now}
@@ -771,7 +772,10 @@ class HomeGuard:
     # ---- apps on Android devices
     # blocked: never opens (only in a master session). always: opens in every mode and has its own
     # internet. ok (the default): opens only while the kid has approved internet, under the site rules.
-    APP_RULES = {"blocked": "⛔ חסומה", "always": "🟢 גם בלי אינטרנט", "ok": "🌐 רק עם אינטרנט"}
+    # free: like ok, but in "full internet" it skips the site filter (e.g. NewPipe while youtube.com stays
+    # blocked for the browser and the YouTube app).
+    APP_RULES = {"blocked": "⛔ חסומה", "always": "🟢 גם בלי אינטרנט", "ok": "🌐 רק עם אינטרנט",
+                 "free": "🎬 חופשית באינטרנט מלא"}
 
     def report_apps(self, pc: str, apps: list) -> dict:
         """The device's launcher apps. A new app on a device we already know is announced with buttons."""
@@ -807,7 +811,7 @@ class HomeGuard:
         return f"{rows[0]['label']}: {self.APP_RULES[rule]}"
 
     def apps_keyboard(self, query: str = "") -> tuple[str, list]:
-        """One row per app on any device: its name, then the three rules (the current one marked)."""
+        """One row per app on any device: its name, then the rules (the current one marked)."""
         q = query.lower()
         rows = [a for a in self.db.q("SELECT * FROM apps WHERE pkg IN (SELECT pkg FROM device_apps) ORDER BY label")
                 if not q or q in a["label"].lower() or q in a["pkg"].lower()]
@@ -822,7 +826,9 @@ class HomeGuard:
         return ("📱 אפליקציות באנדרואיד. לוחצים על המצב הרצוי:\n"
                 "⛔ חסומה: לא נפתחת בכלל (רק בכניסת מאסטר)\n"
                 "🟢 גם בלי אינטרנט: נפתחת תמיד, ויש לה אינטרנט משלה גם כשהאינטרנט חסום (לא לדפדפן)\n"
-                "🌐 רק עם אינטרנט: נפתחת רק כשאישרתם אינטרנט, ולפי האתרים המאושרים" + more), kb
+                "🌐 רק עם אינטרנט: נפתחת רק כשאישרתם אינטרנט, ולפי האתרים המאושרים\n"
+                "🎬 חופשית באינטרנט מלא: כמו 🌐, אבל באינטרנט מלא בלי סינון אתרים "
+                "(למשל NewPipe, כשיוטיוב חסום)" + more), kb
 
     def request_update(self) -> int:
         seq = int(self.db.setting("update_seq", "0")) + 1
@@ -1394,24 +1400,31 @@ class HomeGuard:
             kids = self.db.q("SELECT username, display FROM kids WHERE role!='master' AND disabled=0 ORDER BY display")
             kb = [[{"text": k["display"], "callback_data": f"m:gk:{k['username']}"} for k in kids[i:i + 3]]
                   for i in range(0, len(kids), 3)]
+            # Master accounts too: the device opens fully (no filtering, no app blocks), like a master sign-in.
+            masters = self.db.q("SELECT username, display FROM kids WHERE role='master' AND disabled=0 ORDER BY display")
+            kb += [[{"text": f"🔓 {k['display']} (מאסטר)", "callback_data": f"m:gk:{k['username']}"}] for k in masters]
             self.show(chat, msg, f"▶️ {st['pc']} · לאיזה ילד?", kb + [self.nav("m:g")])
         elif step == "gk":
             if "pc" not in st or not self.db.kid(arg):
                 self.main_menu(chat, msg)
                 return "התפריט התחדש"
             st["kid"] = arg.lower()
+            if self.db.kid(arg)["role"] == "master":
+                return self.menu_callback(chat, "m:gm:open", msg, who)  # master: always fully open
             kb = [[{"text": MODES[m], "callback_data": f"m:gm:{m}"}] for m in ("allowlist", "full", "offline")]
             self.show(chat, msg, f"▶️ {st['pc']} · {self.db.kid_display(st['kid'])} · מה לפתוח?",
                       kb + [self.nav(f"m:gd:{st['devs'].index(st['pc'])}")])
         elif step == "gm":
-            if "kid" not in st or arg not in MODE_NAMES:
+            is_master = "kid" in st and (self.db.kid(st["kid"]) or {"role": ""})["role"] == "master"
+            if "kid" not in st or (arg not in MODE_NAMES and not (arg == "open" and is_master))                     or (is_master and arg != "open"):
                 self.main_menu(chat, msg)
                 return "התפריט התחדש"
             st["mode"] = arg
             options = list(self.cfg["durations"]) + ([0] if arg != "offline" else [])
+            back = f"m:gd:{st['devs'].index(st['pc'])}" if is_master else f"m:gk:{st['kid']}"
             kb = [[{"text": fmt_min(m) if m else "♾️ ללא הגבלה", "callback_data": f"m:gx:{m}"} for m in options],
                   [{"text": "⏱ זמן אחר / עד שעה", "callback_data": "m:gc"}],
-                  self.nav(f"m:gk:{st['kid']}")]
+                  self.nav(back)]
             self.show(chat, msg, f"▶️ {st['pc']} · {self.db.kid_display(st['kid'])} · {MODES[arg]} · לכמה זמן?", kb)
         elif step == "gc":
             if "mode" not in st:
